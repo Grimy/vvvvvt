@@ -1,12 +1,14 @@
 /* See LICENSE file for copyright and license details. */
 
+#define histsize 2048
+
 /*
  * appearance
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
 static char font[] = "Hack-12:antialias=true:autohint=true";
-static int borderpx = 0;
+static int borderpx = 2;
 
 /*
  * What program is execed by st depends of these precedence rules:
@@ -140,16 +142,6 @@ static unsigned int mousebg = 0;
 static unsigned int defaultitalic = 11;
 static unsigned int defaultunderline = 7;
 
-/*
- * Internal mouse shortcuts.
- * Beware that overloading Button1 will disable the selection.
- */
-static MouseShortcut mshortcuts[] = {
-	/* button               mask            string */
-	{ Button4,              XK_ANY_MOD,     "\031" },
-	{ Button5,              XK_ANY_MOD,     "\005" },
-};
-
 /* Internal keyboard shortcuts. */
 
 static Shortcut shortcuts[] = {
@@ -159,6 +151,8 @@ static Shortcut shortcuts[] = {
 	{ ControlMask|ShiftMask, XK_Next,        xzoom,          {.f = -1} },
 	{ ControlMask|ShiftMask, XK_Home,        xzoomreset,     {.f =  0} },
 	{ ShiftMask,             XK_Insert,      selpaste,       {.i =  0} },
+	{ XK_ANY_MOD,            XK_Page_Up,     kscrollup,      {.i = -2} },
+	{ XK_ANY_MOD,            XK_Page_Down,   kscrolldown,    {.i = -2} },
 	{ ControlMask|ShiftMask, XK_C,           clipcopy,       {.i =  0} },
 	{ ControlMask|ShiftMask, XK_V,           clippaste,      {.i =  0} },
 };
