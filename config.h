@@ -101,11 +101,6 @@ static const char *colorname[] = {
 	"#9481fe",
 	"#11e1d1",
 	"#f5f3f5",
-
-	/* more colors can be added after 255 to use with DefaultXX */
-	[255] = 0,
-	"#cccccc",
-	"#555555",
 };
 
 
@@ -115,8 +110,6 @@ static const char *colorname[] = {
  */
 static unsigned int defaultfg = 15;
 static unsigned int defaultbg = 0;
-static unsigned int defaultcs = 256;
-static unsigned int defaultrcs = 257;
 
 /*
  * Default shape of cursor
@@ -134,16 +127,7 @@ static unsigned int mouseshape = XC_xterm;
 static unsigned int mousefg = 7;
 static unsigned int mousebg = 0;
 
-/*
- * Colors used, when the specific fg == defaultfg. So in reverse mode this
- * will reverse too. Another logic would only make the simple feature too
- * complex.
- */
-static unsigned int defaultitalic = 11;
-static unsigned int defaultunderline = 7;
-
 /* Internal keyboard shortcuts. */
-
 static Shortcut shortcuts[] = {
 	/* mask                  keysym          function        argument */
 	{ XK_ANY_MOD,            XK_Break,       sendbreak,      {.i =  0} },
@@ -230,27 +214,18 @@ static Key key[] = {
 	{ XK_Delete,        ControlMask,    "\033[3;5~",     0,    0,    0},
 	{ XK_Delete,        ShiftMask,      "\033[3;2~",     0,    0,    0},
 	{ XK_Delete,        XK_ANY_MOD,     "\033[3~",       0,    0,    0},
-	{ XK_BackSpace,     XK_NO_MOD,      "\b",            0,    0,    0},
+	{ XK_BackSpace,     XK_NO_MOD,      "\x7F",          0,    0,    0},
 	{ XK_BackSpace,     ControlMask,    "\027",          0,    0,    0},
 	{ XK_Home,          XK_ANY_MOD,     "\033[H",        0,   -1,    0},
-	{ XK_End,           XK_ANY_MOD,     "\033[F",        0,    0,    0},
+	{ XK_Home,          XK_ANY_MOD,     "\033[1~",       0,   +1,    0},
+	{ XK_End,           XK_ANY_MOD,     "\033[F",        0,   -1,    0},
+	{ XK_End,           XK_ANY_MOD,     "\033[4~",       0,   +1,    0},
 	{ XK_Prior,         ControlMask,    "\033[5;5~",     0,    0,    0},
 	{ XK_Prior,         ShiftMask,      "\033[5;2~",     0,    0,    0},
 	{ XK_Prior,         XK_ANY_MOD,     "\033[5~",       0,    0,    0},
 	{ XK_Next,          ControlMask,    "\033[6;5~",     0,    0,    0},
 	{ XK_Next,          ShiftMask,      "\033[6;2~",     0,    0,    0},
 	{ XK_Next,          XK_ANY_MOD,     "\033[6~",       0,    0,    0},
-};
-
-/*
- * Selection types' masks.
- * Use the same masks as usual.
- * Button1Mask is always unset, to make masks match between ButtonPress.
- * ButtonRelease and MotionNotify.
- * If no match is found, regular selection is used.
- */
-static uint selmasks[] = {
-	[SEL_RECTANGULAR] = Mod1Mask,
 };
 
 /*

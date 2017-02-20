@@ -255,12 +255,6 @@ typedef struct {
 } XWindow;
 
 typedef struct {
-	uint b;
-	uint mask;
-	char *s;
-} MouseShortcut;
-
-typedef struct {
 	KeySym k;
 	uint mask;
 	char *s;
@@ -465,12 +459,10 @@ static void selinit(void);
 static void selnormalize(void);
 static inline int selected(int, int);
 static char *getsel(void);
-static void selcopy(Time);
 static void selscroll(int, int);
 static void selsnap(int *, int *, int);
 static int x2col(int);
 static int y2row(int);
-static void getbuttoninfo(XEvent *);
 static void mousereport(XEvent *);
 
 static size_t utf8decode(char *, Rune *, size_t);
@@ -857,27 +849,6 @@ selsnap(int *x, int *y, int direction)
 }
 
 void
-getbuttoninfo(XEvent *e)
-{
-	int type;
-	uint state = e->xbutton.state & ~(Button1Mask | forceselmod);
-
-	sel.alt = IS_SET(MODE_ALTSCREEN);
-
-	sel.oe.x = x2col(e->xbutton.x);
-	sel.oe.y = y2row(e->xbutton.y);
-	selnormalize();
-
-	sel.type = SEL_REGULAR;
-	for (type = 1; type < LEN(selmasks); ++type) {
-		if (match(selmasks[type], state)) {
-			sel.type = type;
-			break;
-		}
-	}
-}
-
-void
 mousereport(XEvent *e)
 {
 	int x = x2col(e->xbutton.x), y = y2row(e->xbutton.y),
@@ -948,14 +919,15 @@ bpress(XEvent *e)
 
 	if (IS_SET(MODE_MOUSE) && !(e->xbutton.state & forceselmod)) {
 		mousereport(e);
-		return;
 	}
 
-	if (e->xbutton.button == Button4)
+	else if (e->xbutton.button == Button4) {
 		kscrollup(&(Arg) {.i = 5});
+	}
 
-	else if (e->xbutton.button == Button5)
+	else if (e->xbutton.button == Button5) {
 		kscrolldown(&(Arg) {.i = 5});
+	}
 
 	else if (e->xbutton.button == Button1) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
@@ -971,13 +943,12 @@ bpress(XEvent *e)
 		 * If the user clicks below predefined timeouts specific
 		 * snapping behaviour is exposed.
 		 */
-		if (TIMEDIFF(now, sel.tclick2) <= tripleclicktimeout) {
+		if (TIMEDIFF(now, sel.tclick2) <= tripleclicktimeout)
 			sel.snap = SNAP_LINE;
-		} else if (TIMEDIFF(now, sel.tclick1) <= doubleclicktimeout) {
+		else if (TIMEDIFF(now, sel.tclick1) <= doubleclicktimeout)
 			sel.snap = SNAP_WORD;
-		} else {
+		else
 			sel.snap = 0;
-		}
 		selnormalize();
 
 		if (sel.snap != 0)
@@ -985,6 +956,12 @@ bpress(XEvent *e)
 		tsetdirt(sel.nb.y, sel.ne.y);
 		sel.tclick2 = sel.tclick1;
 		sel.tclick1 = now;
+	}
+
+	else if (e->xbutton.button == Button3) {
+		sel.snap = SNAP_LINE;
+		sel.mode = SEL_READY;
+		bmotion(e);
 	}
 }
 
@@ -1040,12 +1017,6 @@ getsel(void)
 	}
 	*ptr = 0;
 	return str;
-}
-
-void
-selcopy(Time t)
-{
-	xsetsel(getsel(), t);
 }
 
 void
@@ -1272,11 +1243,10 @@ brelease(XEvent *e)
 
 	if (e->xbutton.button == Button2) {
 		selpaste(NULL);
-	} else if (e->xbutton.button == Button1) {
-		if (sel.mode == SEL_READY) {
-			getbuttoninfo(e);
-			selcopy(e->xbutton.time);
-		} else
+	} else if (e->xbutton.button == Button1 || e->xbutton.button == Button3) {
+		if (sel.mode == SEL_READY)
+			xsetsel(getsel(), e->xbutton.time);
+		else
 			selclear(NULL);
 		sel.mode = SEL_IDLE;
 		tsetdirt(sel.nb.y, sel.ne.y);
@@ -1296,12 +1266,16 @@ bmotion(XEvent *e)
 	if (!sel.mode)
 		return;
 
-	sel.mode = SEL_READY;
 	oldey = sel.oe.y;
 	oldex = sel.oe.x;
 	oldsby = sel.nb.y;
 	oldsey = sel.ne.y;
-	getbuttoninfo(e);
+	sel.mode = SEL_READY;
+	sel.alt = IS_SET(MODE_ALTSCREEN);
+	sel.oe.x = x2col(e->xbutton.x);
+	sel.oe.y = y2row(e->xbutton.y);
+	selnormalize();
+	sel.type = SEL_REGULAR;
 
 	if (oldey != sel.oe.y || oldex != sel.oe.x)
 		tsetdirt(MIN(sel.nb.y, oldsby), MAX(sel.ne.y, oldsey));
@@ -3671,16 +3645,6 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	XRenderColor colfg, colbg;
 	XRectangle r;
 
-	/* Determine foreground and background colors based on mode. */
-	if (base.fg == defaultfg) {
-		if (base.mode & ATTR_ITALIC)
-			base.fg = defaultitalic;
-		else if ((base.mode & ATTR_ITALIC) && (base.mode & ATTR_BOLD))
-			base.fg = defaultitalic;
-		else if (base.mode & ATTR_UNDERLINE)
-			base.fg = defaultunderline;
-	}
-
 	if (IS_TRUECOL(base.fg)) {
 		colfg.alpha = 0xffff;
 		colfg.red = TRUERED(base.fg);
@@ -3810,7 +3774,7 @@ xdrawcursor(void)
 {
 	static int oldx = 0, oldy = 0;
 	int curx;
-	Glyph g = {' ', ATTR_NULL, defaultbg, defaultcs}, og;
+	Glyph g = {' ', ATTR_NULL, defaultbg, defaultfg}, og;
 	int ena_sel = sel.ob.x != -1 && sel.alt == IS_SET(MODE_ALTSCREEN);
 	Color drawcol;
 
@@ -3840,19 +3804,19 @@ xdrawcursor(void)
 		g.mode |= ATTR_REVERSE;
 		g.bg = defaultfg;
 		if (ena_sel && selected(term.c.x, term.c.y)) {
-			drawcol = dc.col[defaultcs];
-			g.fg = defaultrcs;
+			drawcol = dc.col[defaultfg];
+			g.fg = defaultbg;
 		} else {
-			drawcol = dc.col[defaultrcs];
-			g.fg = defaultcs;
+			drawcol = dc.col[defaultbg];
+			g.fg = defaultfg;
 		}
 	} else {
 		if (ena_sel && selected(term.c.x, term.c.y)) {
-			drawcol = dc.col[defaultrcs];
+			drawcol = dc.col[defaultbg];
 			g.fg = defaultfg;
-			g.bg = defaultrcs;
+			g.bg = defaultbg;
 		} else {
-			drawcol = dc.col[defaultcs];
+			drawcol = dc.col[defaultfg];
 		}
 	}
 
