@@ -96,13 +96,12 @@ enum glyph_attribute {
 	ATTR_FAINT      = 1 << 1,
 	ATTR_ITALIC     = 1 << 2,
 	ATTR_UNDERLINE  = 1 << 3,
-	ATTR_BLINK      = 1 << 4,
-	ATTR_REVERSE    = 1 << 5,
-	ATTR_INVISIBLE  = 1 << 6,
-	ATTR_STRUCK     = 1 << 7,
-	ATTR_WRAP       = 1 << 8,
-	ATTR_WIDE       = 1 << 9,
-	ATTR_WDUMMY     = 1 << 10,
+	ATTR_REVERSE    = 1 << 4,
+	ATTR_INVISIBLE  = 1 << 5,
+	ATTR_STRUCK     = 1 << 6,
+	ATTR_WRAP       = 1 << 7,
+	ATTR_WIDE       = 1 << 8,
+	ATTR_WDUMMY     = 1 << 9,
 	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
 };
 
@@ -138,19 +137,8 @@ enum term_mode {
 	MODE_MOUSEX10    = 1 << 17,
 	MODE_MOUSEMANY   = 1 << 18,
 	MODE_BRCKTPASTE  = 1 << 19,
-	MODE_PRINT       = 1 << 20,
 	MODE_MOUSE       = MODE_MOUSEBTN|MODE_MOUSEMOTION|MODE_MOUSEX10\
 	                  |MODE_MOUSEMANY,
-};
-
-enum charset {
-	CS_GRAPHIC0,
-	CS_GRAPHIC1,
-	CS_UK,
-	CS_USA,
-	CS_MULTI,
-	CS_GER,
-	CS_FIN
 };
 
 enum escape_state {
@@ -323,18 +311,15 @@ typedef struct {
 	Line hist[histsize]; /* history buffer */
 	int histi;    /* history index */
 	int scr;      /* scroll back */
-	int *dirty;  /* dirtyness of lines */
+	int *dirty;   /* dirtyness of lines */
 	XftGlyphFontSpec *specbuf; /* font spec buffer used for rendering */
 	TCursor c;    /* cursor */
 	int top;      /* top    scroll limit */
 	int bot;      /* bottom scroll limit */
 	int mode;     /* terminal mode flags */
 	int esc;      /* escape state flags */
-	char trantbl[4]; /* charset table translation */
-	int charset;  /* current charset */
-	int icharset; /* selected charset for sequence */
-	int numlock; /* lock numbers in keyboard */
 	int *tabs;
+	int charset;
 } Term;
 
 /* Font structure */
@@ -376,8 +361,6 @@ static void strhandle(void);
 static void strparse(void);
 static void strreset(void);
 
-static int tattrset(int);
-static void tprinter(char *, size_t);
 static void tclearregion(int, int, int, int);
 static void tcursor(int);
 static void tdeletechar(int);
@@ -400,14 +383,12 @@ static void tsetchar(Rune, Glyph *, int, int);
 static void tsetscroll(int, int);
 static void tswapscreen(void);
 static void tsetdirt(int, int);
-static void tsetdirtattr(int);
 static void tsetmode(int, int, int *, int);
 static void tfulldirt(void);
 static void techo(Rune);
 static void tcontrolcode(uchar );
 static void tdectest(char );
 static int32_t tdefcolor(int *, int *, int);
-static void tdeftran(char);
 static inline int match(uint, uint);
 static void ttynew(void);
 static size_t ttyread(void);
@@ -472,7 +453,6 @@ static char utf8encodebyte(Rune, size_t);
 static char *utf8strchr(char *s, Rune u);
 static size_t utf8validate(Rune *, size_t);
 
-static ssize_t xwrite(int, const char *, size_t);
 static void *xmalloc(size_t);
 static void *xrealloc(void *, size_t);
 static char *xstrdup(char *);
@@ -519,7 +499,6 @@ static char **opt_cmd  = NULL;
 static char *opt_class = NULL;
 static char *opt_embed = NULL;
 static char *opt_font  = NULL;
-static char *opt_io    = NULL;
 static char *opt_line  = NULL;
 static char *opt_name  = NULL;
 static char *opt_title = NULL;
@@ -551,23 +530,6 @@ typedef struct {
 /* Fontcache is an array now. A new font will be appended to the array. */
 static Fontcache frc[16];
 static int frclen = 0;
-
-ssize_t
-xwrite(int fd, const char *s, size_t len)
-{
-	size_t aux = len;
-	ssize_t r;
-
-	while (len > 0) {
-		r = write(fd, s, len);
-		if (r < 0)
-			return r;
-		len -= r;
-		s += r;
-	}
-
-	return aux;
-}
 
 void *
 xmalloc(size_t len)
@@ -1389,16 +1351,6 @@ ttynew(void)
 	int m, s;
 	struct winsize w = {term.row, term.col, 0, 0};
 
-	if (opt_io) {
-		term.mode |= MODE_PRINT;
-		iofd = (!strcmp(opt_io, "-")) ?
-			  1 : open(opt_io, O_WRONLY | O_CREAT, 0666);
-		if (iofd < 0) {
-			fprintf(stderr, "Error opening %s:%s\n",
-				opt_io, strerror(errno));
-		}
-	}
-
 	if (opt_line) {
 		if ((cmdfd = open(opt_line, O_RDWR)) < 0)
 			die("open line failed: %s\n", strerror(errno));
@@ -1555,21 +1507,6 @@ ttyresize(void)
 		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
 }
 
-int
-tattrset(int attr)
-{
-	int i, j;
-
-	for (i = 0; i < term.row-1; i++) {
-		for (j = 0; j < term.col-1; j++) {
-			if (term.line[i][j].mode & attr)
-				return 1;
-		}
-	}
-
-	return 0;
-}
-
 void
 tsetdirt(int top, int bot)
 {
@@ -1580,21 +1517,6 @@ tsetdirt(int top, int bot)
 
 	for (i = top; i <= bot; i++)
 		term.dirty[i] = 1;
-}
-
-void
-tsetdirtattr(int attr)
-{
-	int i, j;
-
-	for (i = 0; i < term.row-1; i++) {
-		for (j = 0; j < term.col-1; j++) {
-			if (term.line[i][j].mode & attr) {
-				tsetdirt(i, i);
-				break;
-			}
-		}
-	}
 }
 
 void
@@ -1634,8 +1556,6 @@ treset(void)
 	term.top = 0;
 	term.bot = term.row - 1;
 	term.mode = MODE_WRAP;
-	memset(term.trantbl, CS_USA, sizeof(term.trantbl));
-	term.charset = 0;
 
 	for (i = 0; i < 2; i++) {
 		tmoveto(0, 0);
@@ -1650,8 +1570,6 @@ tnew(int col, int row)
 {
 	term = (Term){ .c = { .attr = { .fg = defaultfg, .bg = defaultbg } } };
 	tresize(col, row);
-	term.numlock = 1;
-
 	treset();
 }
 
@@ -1853,23 +1771,15 @@ tmoveto(int x, int y)
 void
 tsetchar(Rune u, Glyph *attr, int x, int y)
 {
-	static char *vt100_0[62] = { /* 0x41 - 0x7e */
-		"↑", "↓", "→", "←", "█", "▚", "☃", /* A - G */
-		0, 0, 0, 0, 0, 0, 0, 0, /* H - O */
-		0, 0, 0, 0, 0, 0, 0, 0, /* P - W */
-		0, 0, 0, 0, 0, 0, 0, " ", /* X - _ */
+	static char *vt100_0[] = { /* 0x41 - 0x7e */
 		"◆", "▒", "␉", "␌", "␍", "␊", "°", "±", /* ` - g */
 		"␤", "␋", "┘", "┐", "┌", "└", "┼", "⎺", /* h - o */
 		"⎻", "─", "⎼", "⎽", "├", "┤", "┴", "┬", /* p - w */
-		"│", "≤", "≥", "π", "≠", "£", "·", /* x - ~ */
+		"│", "≤", "≥", "π", "≠", "£", "·",      /* x - ~ */
 	};
 
-	/*
-	 * The table is proudly stolen from rxvt.
-	 */
-	if (term.trantbl[term.charset] == CS_GRAPHIC0 &&
-	   BETWEEN(u, 0x41, 0x7e) && vt100_0[u - 0x41])
-		utf8decode(vt100_0[u - 0x41], &u, UTF_SIZ);
+	if (term.charset && BETWEEN(u, '`', '~'))
+		utf8decode(vt100_0[u - '`'], &u, UTF_SIZ);
 
 	if (term.line[y][x].mode & ATTR_WIDE) {
 		if (x+1 < term.col) {
@@ -2028,7 +1938,6 @@ tsetattr(int *attr, int l)
 				ATTR_FAINT      |
 				ATTR_ITALIC     |
 				ATTR_UNDERLINE  |
-				ATTR_BLINK      |
 				ATTR_REVERSE    |
 				ATTR_INVISIBLE  |
 				ATTR_STRUCK     );
@@ -2042,15 +1951,12 @@ tsetattr(int *attr, int l)
 			term.c.attr.mode |= ATTR_FAINT;
 			break;
 		case 3:
+		case 5:
+		case 6:
 			term.c.attr.mode |= ATTR_ITALIC;
 			break;
 		case 4:
 			term.c.attr.mode |= ATTR_UNDERLINE;
-			break;
-		case 5: /* slow blink */
-			/* FALLTHROUGH */
-		case 6: /* rapid blink */
-			term.c.attr.mode |= ATTR_BLINK;
 			break;
 		case 7:
 			term.c.attr.mode |= ATTR_REVERSE;
@@ -2062,16 +1968,14 @@ tsetattr(int *attr, int l)
 			term.c.attr.mode |= ATTR_STRUCK;
 			break;
 		case 22:
-			term.c.attr.mode &= ~(ATTR_BOLD | ATTR_FAINT);
+			term.c.attr.mode &= ~ATTR_BOLD_FAINT;
 			break;
 		case 23:
+		case 25:
 			term.c.attr.mode &= ~ATTR_ITALIC;
 			break;
 		case 24:
 			term.c.attr.mode &= ~ATTR_UNDERLINE;
-			break;
-		case 25:
-			term.c.attr.mode &= ~ATTR_BLINK;
 			break;
 		case 27:
 			term.c.attr.mode &= ~ATTR_REVERSE;
@@ -2097,19 +2001,18 @@ tsetattr(int *attr, int l)
 			term.c.attr.bg = defaultbg;
 			break;
 		default:
-			if (BETWEEN(attr[i], 30, 37)) {
+			if (BETWEEN(attr[i], 30, 37))
 				term.c.attr.fg = attr[i] - 30;
-			} else if (BETWEEN(attr[i], 40, 47)) {
+			else if (BETWEEN(attr[i], 40, 47))
 				term.c.attr.bg = attr[i] - 40;
-			} else if (BETWEEN(attr[i], 90, 97)) {
+			else if (BETWEEN(attr[i], 90, 97))
 				term.c.attr.fg = attr[i] - 90 + 8;
-			} else if (BETWEEN(attr[i], 100, 107)) {
+			else if (BETWEEN(attr[i], 100, 107))
 				term.c.attr.bg = attr[i] - 100 + 8;
-			} else {
+			else
 				fprintf(stderr,
 					"erresc(default): gfx attr %d unknown\n",
 					attr[i]), csidump();
-			}
 			break;
 		}
 	}
@@ -2199,14 +2102,10 @@ tsetmode(int priv, int set, int *args, int narg)
 				MODBIT(term.mode, set, MODE_8BIT);
 				break;
 			case 1049: /* swap screen & set/restore cursor as xterm */
-				if (!allowaltscreen)
-					break;
 				tcursor((set) ? CURSOR_SAVE : CURSOR_LOAD);
 				/* FALLTHROUGH */
 			case 47: /* swap screen */
 			case 1047:
-				if (!allowaltscreen)
-					break;
 				alt = IS_SET(MODE_ALTSCREEN);
 				if (alt) {
 					tclearregion(0, 0, term.col-1,
@@ -2598,17 +2497,6 @@ sendbreak(const Arg *arg)
 }
 
 void
-tprinter(char *s, size_t len)
-{
-	if (iofd != -1 && xwrite(iofd, s, len) < 0) {
-		fprintf(stderr, "Error writing in %s:%s\n",
-			opt_io, strerror(errno));
-		close(iofd);
-		iofd = -1;
-	}
-}
-
-void
 tputtab(int n)
 {
 	uint x = term.c.x;
@@ -2639,20 +2527,6 @@ techo(Rune u)
 		}
 	}
 	tputc(u);
-}
-
-void
-tdeftran(char ascii)
-{
-	static char cs[] = "0B";
-	static int vcs[] = {CS_GRAPHIC0, CS_USA};
-	char *p;
-
-	if ((p = strchr(cs, ascii)) == NULL) {
-		fprintf(stderr, "esc unhandled charset: ESC ( %c\n", ascii);
-	} else {
-		term.trantbl[term.icharset] = vcs[p - cs];
-	}
 }
 
 void
@@ -2726,8 +2600,10 @@ tcontrolcode(uchar ascii)
 		term.esc |= ESC_START;
 		return;
 	case '\016': /* SO (LS1 -- Locking shift 1) */
+		term.charset = 1;
+		return;
 	case '\017': /* SI (LS0 -- Locking shift 0) */
-		term.charset = 1 - (ascii - '\016');
+		term.charset = 0;
 		return;
 	case '\032': /* SUB */
 		tsetchar('?', &term.c.attr, term.c.x, term.c.y);
@@ -2812,13 +2688,11 @@ eschandle(uchar ascii)
 		return 0;
 	case 'n': /* LS2 -- Locking shift 2 */
 	case 'o': /* LS3 -- Locking shift 3 */
-		term.charset = 2 + (ascii - 'n');
 		break;
 	case '(': /* GZD4 -- set primary charset G0 */
 	case ')': /* G1D4 -- set secondary charset G1 */
 	case '*': /* G2D4 -- set tertiary charset G2 */
 	case '+': /* G3D4 -- set quaternary charset G3 */
-		term.icharset = ascii - '(';
 		term.esc |= ESC_ALTCHARSET;
 		return 0;
 	case 'D': /* IND -- Linefeed */
@@ -2888,9 +2762,6 @@ tputc(Rune u)
 		width = 1;
 	}
 
-	if (IS_SET(MODE_PRINT))
-		tprinter(c, len);
-
 	/*
 	 * STR sequence must be checked before anything else
 	 * because it uses all following characters until it
@@ -2946,8 +2817,6 @@ tputc(Rune u)
 				csihandle();
 			}
 			return;
-		} else if (term.esc & ESC_ALTCHARSET) {
-			tdeftran(u);
 		} else if (term.esc & ESC_TEST) {
 			tdectest(u);
 		} else {
@@ -3711,9 +3580,6 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 		fg = &revfg;
 	}
 
-	if (base.mode & ATTR_BLINK && term.mode & MODE_BLINK)
-		fg = bg;
-
 	if (base.mode & ATTR_INVISIBLE)
 		fg = bg;
 
@@ -4023,33 +3889,19 @@ char*
 kmap(KeySym k, uint state)
 {
 	Key *kp;
-	int i;
 
-	/* Check for mapped keys out of X11 function keys. */
-	for (i = 0; i < LEN(mappedkeys); i++) {
-		if (mappedkeys[i] == k)
-			break;
-	}
-	if (i == LEN(mappedkeys)) {
-		if ((k & 0xFFFF) < 0xFD00)
-			return NULL;
-	}
+	if ((k & 0xFFFF) < 0xFD00)
+		return NULL;
 
 	for (kp = key; kp < key + LEN(key); kp++) {
 		if (kp->k != k)
 			continue;
-
 		if (!match(kp->mask, state))
 			continue;
-
 		if (IS_SET(MODE_APPKEYPAD) ? kp->appkey < 0 : kp->appkey > 0)
 			continue;
-		if (term.numlock && kp->appkey == 2)
-			continue;
-
 		if (IS_SET(MODE_APPCURSOR) ? kp->appcursor < 0 : kp->appcursor > 0)
 			continue;
-
 		if (IS_SET(MODE_CRLF) ? kp->crlf < 0 : kp->crlf > 0)
 			continue;
 
@@ -4161,8 +4013,8 @@ run(void)
 	XEvent ev;
 	int w = xw.w, h = xw.h;
 	fd_set rfd;
-	int xfd = XConnectionNumber(xw.dpy), xev, blinkset = 0, dodraw = 0;
-	struct timespec drawtimeout, *tv = NULL, now, last, lastblink;
+	int xfd = XConnectionNumber(xw.dpy), xev, dodraw = 0;
+	struct timespec drawtimeout, *tv = NULL, now, last;
 	long deltatime;
 
 	/* Waiting for window mapping */
@@ -4186,7 +4038,6 @@ run(void)
 	ttyresize();
 
 	clock_gettime(CLOCK_MONOTONIC, &last);
-	lastblink = last;
 
 	for (xev = actionfps;;) {
 		FD_ZERO(&rfd);
@@ -4198,14 +4049,8 @@ run(void)
 				continue;
 			die("select failed: %s\n", strerror(errno));
 		}
-		if (FD_ISSET(cmdfd, &rfd)) {
+		if (FD_ISSET(cmdfd, &rfd))
 			ttyread();
-			if (blinktimeout) {
-				blinkset = tattrset(ATTR_BLINK);
-				if (!blinkset)
-					MODBIT(term.mode, 0, MODE_BLINK);
-			}
-		}
 
 		if (FD_ISSET(xfd, &rfd))
 			xev = actionfps;
@@ -4216,12 +4061,6 @@ run(void)
 		tv = &drawtimeout;
 
 		dodraw = 0;
-		if (blinktimeout && TIMEDIFF(now, lastblink) > blinktimeout) {
-			tsetdirtattr(ATTR_BLINK);
-			term.mode ^= MODE_BLINK;
-			lastblink = now;
-			dodraw = 1;
-		}
 		deltatime = TIMEDIFF(now, last);
 		if (deltatime > 1000 / (xev ? xfps : actionfps)) {
 			dodraw = 1;
@@ -4242,24 +4081,8 @@ run(void)
 
 			if (xev && !FD_ISSET(xfd, &rfd))
 				xev--;
-			if (!FD_ISSET(cmdfd, &rfd) && !FD_ISSET(xfd, &rfd)) {
-				if (blinkset) {
-					if (TIMEDIFF(now, lastblink) \
-							> blinktimeout) {
-						drawtimeout.tv_nsec = 1000;
-					} else {
-						drawtimeout.tv_nsec = (1E6 * \
-							(blinktimeout - \
-							TIMEDIFF(now,
-								lastblink)));
-					}
-					drawtimeout.tv_sec = \
-					    drawtimeout.tv_nsec / 1E9;
-					drawtimeout.tv_nsec %= (long)1E9;
-				} else {
-					tv = NULL;
-				}
-			}
+			if (!FD_ISSET(cmdfd, &rfd) && !FD_ISSET(xfd, &rfd))
+				tv = NULL;
 		}
 	}
 }
@@ -4267,8 +4090,8 @@ run(void)
 void
 usage(void)
 {
-	die("usage: %s [-aiv] [-c class] [-f font] [-g geometry]"
-	    " [-n name] [-o file]\n"
+	die("usage: %s [-iv] [-c class] [-f font] [-g geometry]"
+	    " [-n name]\n"
 	    "          [-T title] [-t title] [-w windowid]"
 	    " [[-e] command [args ...]]\n"
 	    "       %s [-aiv] [-c class] [-f font] [-g geometry]"
@@ -4287,9 +4110,6 @@ main(int argc, char *argv[])
 	xw.cursor = cursorshape;
 
 	ARGBEGIN {
-	case 'a':
-		allowaltscreen = 0;
-		break;
 	case 'c':
 		opt_class = EARGF(usage());
 		break;
@@ -4306,9 +4126,6 @@ main(int argc, char *argv[])
 		break;
 	case 'i':
 		xw.isfixed = 1;
-		break;
-	case 'o':
-		opt_io = EARGF(usage());
 		break;
 	case 'l':
 		opt_line = EARGF(usage());
@@ -4346,4 +4163,3 @@ run:
 
 	return 0;
 }
-

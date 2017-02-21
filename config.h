@@ -39,18 +39,9 @@ static char worddelimiters[] = " <>'`\"(){}";
 static unsigned int doubleclicktimeout = 300;
 static unsigned int tripleclicktimeout = 600;
 
-/* alt screens */
-static int allowaltscreen = 1;
-
 /* frames per second st should at maximum draw to the screen */
 static unsigned int xfps = 60;
 static unsigned int actionfps = 30;
-
-/*
- * blinking timeout (set to 0 to disable blinking) for the terminal blinking
- * attribute.
- */
-static unsigned int blinktimeout = 387;
 
 /*
  * thickness of underline and bar cursors
@@ -66,21 +57,7 @@ static int bellvolume = 0;
 /* default TERM value */
 static char termname[] = "st-256color";
 
-/*
- * spaces per tab
- *
- * When you are changing this value, don't forget to adapt the »it« value in
- * the st.info and appropriately install the st.info in the environment where
- * you use this st version.
- *
- *	it#$tabspaces,
- *
- * Secondly make sure your kernel is not expanding tabs. When running `stty
- * -a` »tab0« should appear. You can tell the terminal to not expand tabs by
- *  running following command:
- *
- *	stty tabs
- */
+/* spaces per tab */
 static unsigned int tabspaces = 8;
 
 /* Terminal colors (16 first used in escape sequence) */
@@ -103,11 +80,7 @@ static const char *colorname[] = {
 	"#f5f3f5",
 };
 
-
-/*
- * Default colors (colorname index)
- * foreground, background, cursor, reverse cursor
- */
+/* Default colors (colorname index) */
 static unsigned int defaultfg = 15;
 static unsigned int defaultbg = 0;
 
@@ -150,7 +123,6 @@ static Shortcut shortcuts[] = {
  * appkey value:
  * * 0: no value
  * * > 0: keypad application mode enabled
- * *   = 2: term.numlock = 1
  * * < 0: keypad application mode disabled
  * appcursor value:
  * * 0: no value
@@ -165,12 +137,6 @@ static Shortcut shortcuts[] = {
  * this table sequentially, so any XK_ANY_MOD must be in the last
  * position for a key.
  */
-
-/*
- * If you want keys other than the X11 function keys (0xFD00 - 0xFFFF)
- * to be mapped below, add them to this array.
- */
-static KeySym mappedkeys[] = { -1 };
 
 /*
  * State bits to ignore when matching key or button events.  By default,
