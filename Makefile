@@ -12,17 +12,12 @@ LIBS = -L/usr/lib -lc -L/usr/X11R6/lib -lm -lrt -lX11 -lutil -lXft \
        `pkg-config --libs freetype2`
 
 # flags
+CC = clang
 CPPFLAGS = -DVERSION=\"${VERSION}\" -D_XOPEN_SOURCE=600
-CFLAGS += -g -std=c99 -pedantic -Wall -Wextra -Wno-sign-compare -Os ${INCS} ${CPPFLAGS}
+CFLAGS += -g -std=c99 -Weverything -Os ${INCS} ${CPPFLAGS}
+CFLAGS += -Wno-sign-compare -Wno-sign-conversion -Wno-missing-noreturn -Wno-format-nonliteral -Wno-deprecated-declarations -Wno-gnu-case-range
 LDFLAGS += -g ${LIBS}
 
-st: st.c
+st: st.c config.h Makefile
 	@echo CC $@
-	@$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
-
-config.h:
-	cp config.def.h config.h
-
-${OBJ}: config.h config.mk
-
-.PHONY: all options clean dist install uninstall
+	@$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@

@@ -2,12 +2,8 @@
 
 #define histsize 2048
 
-/*
- * appearance
- *
- * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
- */
-static char font[] = "Hack-12:antialias=true:autohint=true";
+/* see http://freedesktop.org/software/fontconfig/fontconfig-user.html */
+static char fontname[] = "Hack:antialias=true:autohint=true";
 static int borderpx = 2;
 
 /*
@@ -19,22 +15,20 @@ static int borderpx = 2;
  * 5: value of shell in config.h
  */
 static char shell[] = "/bin/zsh";
-static char *utmp = NULL;
 static char stty_args[] = "stty raw pass8 nl -echo -iexten -cstopb 38400";
 
 /* identification sequence returned in DA and DECID */
 static char vtiden[] = "\033[?6c";
 
-/* Kerning / character bounding-box multipliers */
-static float cwscale = 1.0;
-static float chscale = 1.0;
+/* Kerning / character bounding-box modifiers */
+static int cw_add = 0;
+static int ch_add = 0;
 
 /* word delimiter string */
 static char worddelimiters[] = " <>'`\"(){}";
 
 /* selection timeouts (in milliseconds) */
 static unsigned int doubleclicktimeout = 300;
-static unsigned int tripleclicktimeout = 600;
 
 /* frames per second st should at maximum draw to the screen */
 static unsigned int xfps = 60;
@@ -111,33 +105,35 @@ static uint forceselmod = ShiftMask;
  * world. Please decide about changes wisely.
  */
 static Key key[] = {
-	/* keysym           mask            string      appcursor */
-	{ XK_Up,            ControlMask,    "\033[1;5A",    0 },
-	{ XK_Up,            XK_ANY_MOD,     "\033[A",      -1 },
-	{ XK_Up,            XK_ANY_MOD,     "\033OA",      +1 },
-	{ XK_Down,          ControlMask,    "\033[1;5B",    0 },
-	{ XK_Down,          XK_ANY_MOD,     "\033[B",      -1 },
-	{ XK_Down,          XK_ANY_MOD,     "\033OB",      +1 },
-	{ XK_Right,         ControlMask,    "\033[1;5C",    0 },
-	{ XK_Right,         XK_ANY_MOD,     "\033[C",      -1 },
-	{ XK_Right,         XK_ANY_MOD,     "\033OC",      +1 },
-	{ XK_Left,          ControlMask,    "\033[1;5D",    0 },
-	{ XK_Left,          XK_ANY_MOD,     "\033[D",      -1 },
-	{ XK_Left,          XK_ANY_MOD,     "\033OD",      +1 },
-	{ XK_ISO_Left_Tab,  ShiftMask,      "\033[Z",       0 },
-	{ XK_Return,        XK_ANY_MOD,     "\r",           0 },
-	{ XK_BackSpace,     XK_NO_MOD,      "\x7F",         0 },
-	{ XK_BackSpace,     ControlMask,    "\027",         0 },
-	{ XK_Home,          XK_ANY_MOD,     "\033[H",      -1 },
-	{ XK_Home,          XK_ANY_MOD,     "\033[1~",     +1 },
-	{ XK_Insert,        XK_ANY_MOD,     "\033[2~",      0 },
-	{ XK_Delete,        ControlMask,    "\033[3;5~",    0 },
-	{ XK_Delete,        ShiftMask,      "\033[3;2~",    0 },
-	{ XK_Delete,        XK_ANY_MOD,     "\033[3~",      0 },
-	{ XK_End,           XK_ANY_MOD,     "\033[F",      -1 },
-	{ XK_End,           XK_ANY_MOD,     "\033[4~",     +1 },
-	{ XK_Prior,         XK_ANY_MOD,     "\033[5~",      0 },
-	{ XK_Next,          XK_ANY_MOD,     "\033[6~",      0 },
+	/* keysym        mask          app  string */
+	{ XK_Up,         ControlMask,   0,  "\033[1;5A" },
+	{ XK_Up,         XK_ANY_MOD,   -1,  "\033[A"    },
+	{ XK_Up,         XK_ANY_MOD,   +1,  "\033OA"    },
+	{ XK_Down,       ControlMask,   0,  "\033[1;5B" },
+	{ XK_Down,       XK_ANY_MOD,   -1,  "\033[B"    },
+	{ XK_Down,       XK_ANY_MOD,   +1,  "\033OB"    },
+	{ XK_Right,      ControlMask,   0,  "\033[1;5C" },
+	{ XK_Right,      XK_ANY_MOD,   -1,  "\033[C"    },
+	{ XK_Right,      XK_ANY_MOD,   +1,  "\033OC"    },
+	{ XK_Left,       ControlMask,   0,  "\033[1;5D" },
+	{ XK_Left,       XK_ANY_MOD,   -1,  "\033[D"    },
+	{ XK_Left,       XK_ANY_MOD,   +1,  "\033OD"    },
+	{ XK_Tab,        ShiftMask,     0,  "\033[Z"    },
+	{ XK_Escape,     XK_ANY_MOD,    0,  "\033"      },
+	{ XK_Tab,        XK_ANY_MOD,    0,  "\t"        },
+	{ XK_Return,     XK_ANY_MOD,    0,  "\r"        },
+	{ XK_BackSpace,  XK_NO_MOD,     0,  "\x7F"      },
+	{ XK_BackSpace,  ControlMask,   0,  "\027"      },
+	{ XK_Home,       XK_ANY_MOD,   -1,  "\033[H"    },
+	{ XK_Home,       XK_ANY_MOD,   +1,  "\033[1~"   },
+	{ XK_Insert,     XK_ANY_MOD,    0,  "\033[2~"   },
+	{ XK_Delete,     ControlMask,   0,  "\033[3;5~" },
+	{ XK_Delete,     ShiftMask,     0,  "\033[3;2~" },
+	{ XK_Delete,     XK_ANY_MOD,    0,  "\033[3~"   },
+	{ XK_End,        XK_ANY_MOD,   -1,  "\033[F"    },
+	{ XK_End,        XK_ANY_MOD,   +1,  "\033[4~"   },
+	{ XK_Prior,      XK_ANY_MOD,    0,  "\033[5~"   },
+	{ XK_Next,       XK_ANY_MOD,    0,  "\033[6~"   },
 };
 
 /*
