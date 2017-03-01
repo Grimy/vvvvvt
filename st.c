@@ -69,7 +69,7 @@ char *argv0;
 #define DEFAULT(a, b)		(a) = (a) ? (a) : (b)
 #define BETWEEN(x, a, b)	((a) <= (x) && (x) <= (b))
 #define DIVCEIL(n, d)		(((n) + ((d) - 1)) / (d))
-#define ISCONTROLC0(c)		(BETWEEN(c, 0, 0x1f) || (c) == '\177')
+#define ISCONTROLC0(c)		((c) < 0x20 || (c) == '\177')
 #define ISCONTROLC1(c)		(BETWEEN(c, 0x80, 0x9f))
 #define ISCONTROL(c)		(ISCONTROLC0(c) || ISCONTROLC1(c))
 #define ISDELIM(u)		(utf8strchr(worddelimiters, u) != NULL)
@@ -118,16 +118,11 @@ enum cursor_state {
 
 enum term_mode {
 	MODE_WRAP        = 1 << 0,
-	MODE_INSERT      = 1 << 1,
-	MODE_APPKEYPAD   = 1 << 2,
 	MODE_ALTSCREEN   = 1 << 3,
-	MODE_CRLF        = 1 << 4,
 	MODE_MOUSEBTN    = 1 << 5,
 	MODE_MOUSEMOTION = 1 << 6,
 	MODE_REVERSE     = 1 << 7,
-	MODE_KBDLOCK     = 1 << 8,
 	MODE_HIDE        = 1 << 9,
-	MODE_ECHO        = 1 << 10,
 	MODE_APPCURSOR   = 1 << 11,
 	MODE_MOUSESGR    = 1 << 12,
 	MODE_8BIT        = 1 << 13,
@@ -231,7 +226,6 @@ typedef struct {
 	Visual *vis;
 	XSetWindowAttributes attrs;
 	int scr;
-	int isfixed; /* is fixed geometry? */
 	int l, t; /* left and top offset */
 	int gm; /* geometry mask */
 	int tw, th; /* tty width and height */
@@ -246,10 +240,8 @@ typedef struct {
 	KeySym k;
 	uint mask;
 	char *s;
-	/* three valued logic variables: 0 indifferent, 1 on, -1 off */
-	signed char appkey;    /* application keypad */
+	/* three valued logic variable: 0 indifferent, 1 on, -1 off */
 	signed char appcursor; /* application cursor */
-	signed char crlf;      /* crlf mode          */
 } Key;
 
 typedef struct {
@@ -274,30 +266,20 @@ typedef struct {
 	struct timespec tclick2;
 } Selection;
 
-typedef union {
-	int i;
-	uint ui;
-	float f;
-	const void *v;
-} Arg;
-
 typedef struct {
 	uint mod;
 	KeySym keysym;
-	void (*func)(const Arg *);
-	const Arg arg;
+	void (*func)();
 } Shortcut;
 
 /* function definitions used in config.h */
-static void clipcopy(const Arg *);
-static void clippaste(const Arg *);
-static void kscrolldown(const Arg *);
-static void kscrollup(const Arg *);
-static void selpaste(const Arg *);
-static void xzoom(const Arg *);
-static void xzoomabs(const Arg *);
-static void xzoomreset(const Arg *);
-static void sendbreak(const Arg *);
+static void clipcopy(void);
+static void clippaste(void);
+static void kscrolldown(int n);
+static void kscrollup(int n);
+static void selpaste(void);
+static void scrolldown(void);
+static void scrollup(void);
 
 /* Config.h for applying patches and the configuration. */
 #include "config.h"
@@ -370,7 +352,6 @@ static void tinsertblankline(int);
 static int tlinelen(int);
 static void tmoveto(int, int);
 static void tmoveato(int, int);
-static void tnew(int, int);
 static void tnewline(int);
 static void tputtab(int);
 static void tputc(Rune);
@@ -385,7 +366,6 @@ static void tswapscreen(void);
 static void tsetdirt(int, int);
 static void tsetmode(int, int, int *, int);
 static void tfulldirt(void);
-static void techo(Rune);
 static void tcontrolcode(uchar );
 static void tdectest(char );
 static int32_t tdefcolor(int *, int *, int);
@@ -393,7 +373,6 @@ static inline int match(uint, uint);
 static void ttynew(void);
 static size_t ttyread(void);
 static void ttyresize(void);
-static void ttysend(char *, size_t);
 static void ttywrite(const char *, size_t);
 static void tstrsequence(uchar);
 
@@ -407,7 +386,6 @@ static void xdrawcursor(void);
 static void xinit(void);
 static void xloadcols(void);
 static int xsetcolorname(int, const char *);
-static int xgeommasktogravity(int);
 static int xloadfont(Font *, FcPattern *);
 static void xloadfonts(char *, double);
 static void xsettitle(char *);
@@ -415,8 +393,6 @@ static void xresettitle(void);
 static void xsetpointermotion(int);
 static void xseturgency(int);
 static void xsetsel(char *, Time);
-static void xunloadfont(Font *);
-static void xunloadfonts(void);
 static void xresize(int, int);
 
 static void expose(XEvent *);
@@ -496,11 +472,9 @@ static pid_t pid;
 static Selection sel;
 static int iofd = 1;
 static char **opt_cmd  = NULL;
-static char *opt_class = NULL;
 static char *opt_embed = NULL;
 static char *opt_font  = NULL;
 static char *opt_line  = NULL;
-static char *opt_name  = NULL;
 static char *opt_title = NULL;
 static int oldbutton   = 3; /* button event on startup: 3 = release */
 
@@ -884,11 +858,11 @@ bpress(XEvent *e)
 	}
 
 	else if (e->xbutton.button == Button4) {
-		kscrollup(&(Arg) {.i = 5});
+		kscrollup(5);
 	}
 
 	else if (e->xbutton.button == Button5) {
-		kscrolldown(&(Arg) {.i = 5});
+		kscrolldown(5);
 	}
 
 	else if (e->xbutton.button == Button1) {
@@ -1069,7 +1043,7 @@ selnotify(XEvent *e)
 
 		if (IS_SET(MODE_BRCKTPASTE) && ofs == 0)
 			ttywrite("\033[200~", 6);
-		ttysend((char *)data, nitems * format / 8);
+		ttywrite((char *)data, nitems * format / 8);
 		if (IS_SET(MODE_BRCKTPASTE) && rem == 0)
 			ttywrite("\033[201~", 6);
 		XFree(data);
@@ -1085,14 +1059,13 @@ selnotify(XEvent *e)
 }
 
 void
-selpaste(const Arg *dummy)
+selpaste()
 {
-	XConvertSelection(xw.dpy, XA_PRIMARY, sel.xtarget, XA_PRIMARY,
-			xw.win, CurrentTime);
+	XConvertSelection(xw.dpy, XA_PRIMARY, sel.xtarget, XA_PRIMARY, xw.win, CurrentTime);
 }
 
 void
-clipcopy(const Arg *dummy)
+clipcopy()
 {
 	Atom clipboard;
 
@@ -1107,7 +1080,7 @@ clipcopy(const Arg *dummy)
 }
 
 void
-clippaste(const Arg *dummy)
+clippaste()
 {
 	Atom clipboard;
 
@@ -1119,6 +1092,7 @@ clippaste(const Arg *dummy)
 void
 selclear(XEvent *e)
 {
+	(void) e;
 	if (sel.ob.x == -1)
 		return;
 	sel.mode = SEL_IDLE;
@@ -1204,7 +1178,7 @@ brelease(XEvent *e)
 	}
 
 	if (e->xbutton.button == Button2) {
-		selpaste(NULL);
+		selpaste();
 	} else if (e->xbutton.button == Button1 || e->xbutton.button == Button3) {
 		if (sel.mode == SEL_READY)
 			xsetsel(getsel(), e->xbutton.time);
@@ -1289,7 +1263,7 @@ execsh(void)
 	setenv("USER", pw->pw_name, 1);
 	setenv("SHELL", sh, 1);
 	setenv("HOME", pw->pw_dir, 1);
-	setenv("TERM", termname, 1);
+	setenv("TERM", term_name, 1);
 	setenv("WINDOWID", buf, 1);
 
 	signal(SIGCHLD, SIG_DFL);
@@ -1304,9 +1278,8 @@ execsh(void)
 }
 
 void
-sigchld(int a)
+sigchld(int stat)
 {
-	int stat;
 	pid_t p;
 
 	if ((p = waitpid(pid, &stat, WNOHANG)) < 0)
@@ -1425,9 +1398,8 @@ ttywrite(const char *s, size_t n)
 	fd_set wfd, rfd;
 	ssize_t r;
 	size_t lim = 256;
-	Arg arg = (Arg){ .i = term.scr };
 
-	kscrolldown(&arg);
+	kscrolldown(term.scr);
 
 	/*
 	 * Remember that we are using a pty, which might be a modem line.
@@ -1480,21 +1452,6 @@ write_error:
 }
 
 void
-ttysend(char *s, size_t n)
-{
-	int len;
-	Rune u;
-
-	ttywrite(s, n);
-	if (IS_SET(MODE_ECHO))
-		while ((len = utf8decode(s, &u, n)) > 0) {
-			techo(u);
-			n -= len;
-			s += len;
-		}
-}
-
-void
 ttyresize(void)
 {
 	struct winsize w;
@@ -1542,8 +1499,6 @@ tcursor(int mode)
 void
 treset(void)
 {
-	uint i;
-
 	term.c = (TCursor){{
 		.mode = ATTR_NULL,
 		.fg = defaultfg,
@@ -1551,26 +1506,18 @@ treset(void)
 	}, .x = 0, .y = 0, .state = CURSOR_DEFAULT};
 
 	memset(term.tabs, 0, term.col * sizeof(*term.tabs));
-	for (i = tabspaces; i < term.col; i += tabspaces)
+	for (int i = tabspaces; i < term.col; i += tabspaces)
 		term.tabs[i] = 1;
 	term.top = 0;
 	term.bot = term.row - 1;
 	term.mode = MODE_WRAP;
 
-	for (i = 0; i < 2; i++) {
+	for (int i = 0; i < 2; i++) {
 		tmoveto(0, 0);
 		tcursor(CURSOR_SAVE);
 		tclearregion(0, 0, term.col-1, term.row-1);
 		tswapscreen();
 	}
-}
-
-void
-tnew(int col, int row)
-{
-	term = (Term){ .c = { .attr = { .fg = defaultfg, .bg = defaultbg } } };
-	tresize(col, row);
-	treset();
 }
 
 void
@@ -1585,16 +1532,8 @@ tswapscreen(void)
 }
 
 void
-kscrolldown(const Arg* a)
+kscrolldown(int n)
 {
-	int n = a->i;
-
-	if (n < 0)
-		n = term.row + n;
-
-	if (n > term.scr)
-		n = term.scr;
-
 	if (term.scr > 0) {
 		term.scr -= n;
 		selscroll(0, -n);
@@ -1603,19 +1542,17 @@ kscrolldown(const Arg* a)
 }
 
 void
-kscrollup(const Arg* a)
+kscrollup(int n)
 {
-	int n = a->i;
-
-	if (n < 0)
-		n = term.row + n;
-
 	if (term.scr <= histsize - n) {
 		term.scr += n;
 		selscroll(0, n);
 		tfulldirt();
 	}
 }
+
+static void scrolldown(void) { kscrolldown(term.row - 2); }
+static void scrollup(void) { kscrollup(term.row - 2); }
 
 void
 tscrolldown(int orig, int n, int copyhist)
@@ -1706,11 +1643,10 @@ tnewline(int first_col)
 {
 	int y = term.c.y;
 
-	if (y == term.bot) {
+	if (y == term.bot)
 		tscrollup(term.top, 1, 1);
-	} else {
+	else
 		y++;
-	}
 	tmoveto(first_col ? 0 : term.c.x, y);
 }
 
@@ -1892,9 +1828,8 @@ tdefcolor(int *attr, int *npar, int l)
 		g = attr[*npar + 3];
 		b = attr[*npar + 4];
 		*npar += 4;
-		if (!BETWEEN(r, 0, 255) || !BETWEEN(g, 0, 255) || !BETWEEN(b, 0, 255))
-			fprintf(stderr, "erresc: bad rgb color (%u,%u,%u)\n",
-				r, g, b);
+		if (r > 255 || g > 255 || b > 255)
+			fprintf(stderr, "erresc: bad rgb color (%u,%u,%u)\n", r, g, b);
 		else
 			idx = TRUECOLOR(r, g, b);
 		break;
@@ -2041,124 +1976,74 @@ tsetmode(int priv, int set, int *args, int narg)
 	int alt;
 
 	for (lim = args + narg; args < lim; ++args) {
-		if (priv) {
-			switch (*args) {
-			case 1: /* DECCKM -- Cursor key */
-				MODBIT(term.mode, set, MODE_APPCURSOR);
-				break;
-			case 5: /* DECSCNM -- Reverse video */
-				mode = term.mode;
-				MODBIT(term.mode, set, MODE_REVERSE);
-				if (mode != term.mode)
-					redraw();
-				break;
-			case 6: /* DECOM -- Origin */
-				MODBIT(term.c.state, set, CURSOR_ORIGIN);
-				tmoveato(0, 0);
-				break;
-			case 7: /* DECAWM -- Auto wrap */
-				MODBIT(term.mode, set, MODE_WRAP);
-				break;
-			case 0:  /* Error (IGNORED) */
-			case 2:  /* DECANM -- ANSI/VT52 (IGNORED) */
-			case 3:  /* DECCOLM -- Column  (IGNORED) */
-			case 4:  /* DECSCLM -- Scroll (IGNORED) */
-			case 8:  /* DECARM -- Auto repeat (IGNORED) */
-			case 18: /* DECPFF -- Printer feed (IGNORED) */
-			case 19: /* DECPEX -- Printer extent (IGNORED) */
-			case 42: /* DECNRCM -- National characters (IGNORED) */
-			case 12: /* att610 -- Start blinking cursor (IGNORED) */
-				break;
-			case 25: /* DECTCEM -- Text Cursor Enable Mode */
-				MODBIT(term.mode, !set, MODE_HIDE);
-				break;
-			case 9:    /* X10 mouse compatibility mode */
-				xsetpointermotion(0);
-				MODBIT(term.mode, 0, MODE_MOUSE);
-				MODBIT(term.mode, set, MODE_MOUSEX10);
-				break;
-			case 1000: /* 1000: report button press */
-				xsetpointermotion(0);
-				MODBIT(term.mode, 0, MODE_MOUSE);
-				MODBIT(term.mode, set, MODE_MOUSEBTN);
-				break;
-			case 1002: /* 1002: report motion on button press */
-				xsetpointermotion(0);
-				MODBIT(term.mode, 0, MODE_MOUSE);
-				MODBIT(term.mode, set, MODE_MOUSEMOTION);
-				break;
-			case 1003: /* 1003: enable all mouse motions */
-				xsetpointermotion(set);
-				MODBIT(term.mode, 0, MODE_MOUSE);
-				MODBIT(term.mode, set, MODE_MOUSEMANY);
-				break;
-			case 1004: /* 1004: send focus events to tty */
-				MODBIT(term.mode, set, MODE_FOCUS);
-				break;
-			case 1006: /* 1006: extended reporting mode */
-				MODBIT(term.mode, set, MODE_MOUSESGR);
-				break;
-			case 1034:
-				MODBIT(term.mode, set, MODE_8BIT);
-				break;
-			case 1049: /* swap screen & set/restore cursor as xterm */
-				tcursor((set) ? CURSOR_SAVE : CURSOR_LOAD);
-				/* FALLTHROUGH */
-			case 47: /* swap screen */
-			case 1047:
-				alt = IS_SET(MODE_ALTSCREEN);
-				if (alt) {
-					tclearregion(0, 0, term.col-1,
-							term.row-1);
-				}
-				if (set ^ alt) /* set is always 1 or 0 */
-					tswapscreen();
-				if (*args != 1049)
-					break;
-				/* FALLTHROUGH */
-			case 1048:
-				tcursor((set) ? CURSOR_SAVE : CURSOR_LOAD);
-				break;
-			case 2004: /* 2004: bracketed paste mode */
-				MODBIT(term.mode, set, MODE_BRCKTPASTE);
-				break;
-			/* Not implemented mouse modes. See comments there. */
-			case 1001: /* mouse highlight mode; can hang the
-				      terminal by design when implemented. */
-			case 1005: /* UTF-8 mouse mode; will confuse
-				      applications not supporting UTF-8
-				      and luit. */
-			case 1015: /* urxvt mangled mouse mode; incompatible
-				      and can be mistaken for other control
-				      codes. */
-			default:
-				fprintf(stderr,
-					"erresc: unknown private set/reset mode %d\n",
-					*args);
-				break;
-			}
-		} else {
-			switch (*args) {
-			case 0:  /* Error (IGNORED) */
-				break;
-			case 2:  /* KAM -- keyboard action */
-				MODBIT(term.mode, set, MODE_KBDLOCK);
-				break;
-			case 4:  /* IRM -- Insertion-replacement */
-				MODBIT(term.mode, set, MODE_INSERT);
-				break;
-			case 12: /* SRM -- Send/Receive */
-				MODBIT(term.mode, !set, MODE_ECHO);
-				break;
-			case 20: /* LNM -- Linefeed/new line */
-				MODBIT(term.mode, set, MODE_CRLF);
-				break;
-			default:
-				fprintf(stderr,
-					"erresc: unknown set/reset mode %d\n",
-					*args);
-				break;
-			}
+		switch (priv ? *args : -*args) {
+		case 1: /* DECCKM -- Cursor key */
+			MODBIT(term.mode, set, MODE_APPCURSOR);
+			break;
+		case 5: /* DECSCNM -- Reverse video */
+			mode = term.mode;
+			MODBIT(term.mode, set, MODE_REVERSE);
+			if (mode != term.mode)
+				redraw();
+			break;
+		case 6: /* DECOM -- Origin */
+			MODBIT(term.c.state, set, CURSOR_ORIGIN);
+			tmoveato(0, 0);
+			break;
+		case 7: /* DECAWM -- Auto wrap */
+			MODBIT(term.mode, set, MODE_WRAP);
+			break;
+		case 9: /* X10 mouse compatibility mode */
+			xsetpointermotion(0);
+			MODBIT(term.mode, 0, MODE_MOUSE);
+			MODBIT(term.mode, set, MODE_MOUSEX10);
+			break;
+		case 25: /* DECTCEM -- Text Cursor Enable Mode */
+			MODBIT(term.mode, !set, MODE_HIDE);
+			break;
+		case 1000: /* 1000: report button press */
+			xsetpointermotion(0);
+			MODBIT(term.mode, 0, MODE_MOUSE);
+			MODBIT(term.mode, set, MODE_MOUSEBTN);
+			break;
+		case 1002: /* 1002: report motion on button press */
+			xsetpointermotion(0);
+			MODBIT(term.mode, 0, MODE_MOUSE);
+			MODBIT(term.mode, set, MODE_MOUSEMOTION);
+			break;
+		case 1003: /* 1003: enable all mouse motions */
+			xsetpointermotion(set);
+			MODBIT(term.mode, 0, MODE_MOUSE);
+			MODBIT(term.mode, set, MODE_MOUSEMANY);
+			break;
+		case 1004: /* 1004: send focus events to tty */
+			MODBIT(term.mode, set, MODE_FOCUS);
+			break;
+		case 1006: /* 1006: extended reporting mode */
+			MODBIT(term.mode, set, MODE_MOUSESGR);
+			break;
+		case 1034:
+			MODBIT(term.mode, set, MODE_8BIT);
+			break;
+		case 47:
+		case 1047:
+		case 1048:
+		case 1049: /* swap screen & set/restore cursor */
+			tcursor((set) ? CURSOR_SAVE : CURSOR_LOAD);
+			alt = IS_SET(MODE_ALTSCREEN);
+			if (alt)
+				tclearregion(0, 0, term.col-1, term.row-1);
+			if (set ^ alt)
+				tswapscreen();
+			tcursor((set) ? CURSOR_SAVE : CURSOR_LOAD);
+			break;
+		case 2004: /* 2004: bracketed paste mode */
+			MODBIT(term.mode, set, MODE_BRCKTPASTE);
+			break;
+		/* Unimplemented mouse modes: 1001, 1005, 1015 */
+		default:
+			fprintf(stderr, "erresc: unknown set/reset mode %d\n", *args);
+			break;
 		}
 	}
 }
@@ -2490,16 +2375,9 @@ strreset(void)
 }
 
 void
-sendbreak(const Arg *arg)
-{
-	if (tcsendbreak(cmdfd, 0))
-		perror("Error sending break");
-}
-
-void
 tputtab(int n)
 {
-	uint x = term.c.x;
+	int x = term.c.x;
 
 	if (n > 0) {
 		while (x < term.col && n--)
@@ -2511,22 +2389,6 @@ tputtab(int n)
 				/* nothing */ ;
 	}
 	term.c.x = LIMIT(x, 0, term.col-1);
-}
-
-void
-techo(Rune u)
-{
-	if (ISCONTROL(u)) { /* control code */
-		if (u & 0x80) {
-			u &= 0x7f;
-			tputc('^');
-			tputc('[');
-		} else if (u != '\n' && u != '\r' && u != '\t') {
-			u ^= 0x40;
-			tputc('^');
-		}
-	}
-	tputc(u);
 }
 
 void
@@ -2581,7 +2443,7 @@ tcontrolcode(uchar ascii)
 	case '\v':   /* VT */
 	case '\n':   /* LF */
 		/* go to first col if the mode is set */
-		tnewline(IS_SET(MODE_CRLF));
+		tnewline(0);
 		return;
 	case '\a':   /* BEL */
 		if (term.esc & ESC_STR_END) {
@@ -2688,7 +2550,7 @@ eschandle(uchar ascii)
 		return 0;
 	case 'n': /* LS2 -- Locking shift 2 */
 	case 'o': /* LS3 -- Locking shift 3 */
-		break;
+		return 1;
 	case '(': /* GZD4 -- set primary charset G0 */
 	case ')': /* G1D4 -- set secondary charset G1 */
 	case '*': /* G2D4 -- set tertiary charset G2 */
@@ -2696,55 +2558,46 @@ eschandle(uchar ascii)
 		term.esc |= ESC_ALTCHARSET;
 		return 0;
 	case 'D': /* IND -- Linefeed */
-		if (term.c.y == term.bot) {
+		if (term.c.y == term.bot)
 			tscrollup(term.top, 1, 1);
-		} else {
+		else
 			tmoveto(term.c.x, term.c.y+1);
-		}
-		break;
+		return 1;
 	case 'E': /* NEL -- Next line */
 		tnewline(1); /* always go to first col */
-		break;
+		return 1;
 	case 'H': /* HTS -- Horizontal tab stop */
 		term.tabs[term.c.x] = 1;
-		break;
+		return 1;
 	case 'M': /* RI -- Reverse index */
-		if (term.c.y == term.top) {
+		if (term.c.y == term.top)
 			tscrolldown(term.top, 1, 1);
-		} else {
+		else
 			tmoveto(term.c.x, term.c.y-1);
-		}
-		break;
+		return 1;
 	case 'Z': /* DECID -- Identify Terminal */
 		ttywrite(vtiden, sizeof(vtiden) - 1);
-		break;
+		return 1;
 	case 'c': /* RIS -- Reset to inital state */
 		treset();
 		xresettitle();
 		xloadcols();
-		break;
-	case '=': /* DECPAM -- Application keypad */
-		term.mode |= MODE_APPKEYPAD;
-		break;
-	case '>': /* DECPNM -- Normal keypad */
-		term.mode &= ~MODE_APPKEYPAD;
-		break;
+		return 1;
 	case '7': /* DECSC -- Save Cursor */
 		tcursor(CURSOR_SAVE);
-		break;
+		return 1;
 	case '8': /* DECRC -- Restore Cursor */
 		tcursor(CURSOR_LOAD);
-		break;
+		return 1;
 	case '\\': /* ST -- String Terminator */
 		if (term.esc & ESC_STR_END)
 			strhandle();
-		break;
+		return 1;
 	default:
 		fprintf(stderr, "erresc: unknown sequence ESC 0x%02X '%c'\n",
-			(uchar) ascii, isprint(ascii)? ascii:'.');
-		break;
+			(uchar) ascii, isprint(ascii) ? ascii : '.');
+		return 1;
 	}
-	return 1;
 }
 
 void
@@ -2840,9 +2693,6 @@ tputc(Rune u)
 		tnewline(1);
 		gp = &term.line[term.c.y][term.c.x];
 	}
-
-	if (IS_SET(MODE_INSERT) && term.c.x+width < term.col)
-		memmove(gp+width, gp, (term.col - term.c.x - width) * sizeof(Glyph));
 
 	if (term.c.x+width > term.col) {
 		tnewline(1);
@@ -2994,8 +2844,9 @@ xloadcolor(int i, const char *name, Color *ncolor)
 			}
 			return XftColorAllocValue(xw.dpy, xw.vis,
 			                          xw.cmap, &color, ncolor);
-		} else
+		} else {
 			name = colorname[i];
+		}
 	}
 
 	return XftColorAllocName(xw.dpy, xw.vis, xw.cmap, name, ncolor);
@@ -3055,50 +2906,9 @@ xclear(int x1, int y1, int x2, int y2)
 void
 xhints(void)
 {
-	XClassHint class = {opt_name ? opt_name : termname,
-	                    opt_class ? opt_class : termname};
-	XWMHints wm = {.flags = InputHint, .input = 1};
-	XSizeHints *sizeh = NULL;
-
-	sizeh = XAllocSizeHints();
-
-	sizeh->flags = PSize | PResizeInc | PBaseSize;
-	sizeh->height = xw.h;
-	sizeh->width = xw.w;
-	sizeh->height_inc = xw.ch;
-	sizeh->width_inc = xw.cw;
-	sizeh->base_height = 2 * borderpx;
-	sizeh->base_width = 2 * borderpx;
-	if (xw.isfixed) {
-		sizeh->flags |= PMaxSize | PMinSize;
-		sizeh->min_width = sizeh->max_width = xw.w;
-		sizeh->min_height = sizeh->max_height = xw.h;
-	}
-	if (xw.gm & (XValue|YValue)) {
-		sizeh->flags |= USPosition | PWinGravity;
-		sizeh->x = xw.l;
-		sizeh->y = xw.t;
-		sizeh->win_gravity = xgeommasktogravity(xw.gm);
-	}
-
-	XSetWMProperties(xw.dpy, xw.win, NULL, NULL, NULL, 0, sizeh, &wm,
-			&class);
-	XFree(sizeh);
-}
-
-int
-xgeommasktogravity(int mask)
-{
-	switch (mask & (XNegative|YNegative)) {
-	case 0:
-		return NorthWestGravity;
-	case XNegative:
-		return NorthEastGravity;
-	case YNegative:
-		return SouthWestGravity;
-	}
-
-	return SouthEastGravity;
+	XClassHint class = { term_name, term_class };
+	XWMHints wm = { .flags = InputHint, .input = 1 };
+	XSetWMProperties(xw.dpy, xw.win, NULL, NULL, NULL, 0, NULL, &wm, &class);
 }
 
 int
@@ -3142,11 +2952,10 @@ xloadfonts(char *fontstr, double fontsize)
 	double fontval;
 	float ceilf(float);
 
-	if (fontstr[0] == '-') {
+	if (fontstr[0] == '-')
 		pattern = XftXlfdParse(fontstr, False, False);
-	} else {
+	else
 		pattern = FcNameParse((FcChar8 *)fontstr);
-	}
 
 	if (!pattern)
 		die("st: can't open font %s\n", fontstr);
@@ -3205,59 +3014,6 @@ xloadfonts(char *fontstr, double fontsize)
 		die("st: can't open font %s\n", fontstr);
 
 	FcPatternDestroy(pattern);
-}
-
-void
-xunloadfont(Font *f)
-{
-	XftFontClose(xw.dpy, f->match);
-	FcPatternDestroy(f->pattern);
-	if (f->set)
-		FcFontSetDestroy(f->set);
-}
-
-void
-xunloadfonts(void)
-{
-	/* Free the loaded fonts in the font cache.  */
-	while (frclen > 0)
-		XftFontClose(xw.dpy, frc[--frclen].font);
-
-	xunloadfont(&dc.font);
-	xunloadfont(&dc.bfont);
-	xunloadfont(&dc.ifont);
-	xunloadfont(&dc.ibfont);
-}
-
-void
-xzoom(const Arg *arg)
-{
-	Arg larg;
-
-	larg.f = usedfontsize + arg->f;
-	xzoomabs(&larg);
-}
-
-void
-xzoomabs(const Arg *arg)
-{
-	xunloadfonts();
-	xloadfonts(usedfont, arg->f);
-	cresize(0, 0);
-	ttyresize();
-	redraw();
-	xhints();
-}
-
-void
-xzoomreset(const Arg *arg)
-{
-	Arg larg;
-
-	if (defaultfontsize > 0) {
-		larg.f = defaultfontsize;
-		xzoomabs(&larg);
-	}
 }
 
 void
@@ -3537,7 +3293,7 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	}
 
 	/* Change basic system colors [0-7] to bright system colors [8-15] */
-	if ((base.mode & ATTR_BOLD_FAINT) == ATTR_BOLD && BETWEEN(base.fg, 0, 7))
+	if ((base.mode & ATTR_BOLD_FAINT) == ATTR_BOLD && base.fg < 8)
 		fg = &dc.col[base.fg + 8];
 
 	if (IS_SET(MODE_REVERSE)) {
@@ -3823,6 +3579,7 @@ drawregion(int x1, int y1, int x2, int y2)
 void
 expose(XEvent *ev)
 {
+	(void) ev;
 	redraw();
 }
 
@@ -3837,6 +3594,7 @@ visibility(XEvent *ev)
 void
 unmap(XEvent *ev)
 {
+	(void) ev;
 	xw.state &= ~WIN_VISIBLE;
 }
 
@@ -3898,11 +3656,7 @@ kmap(KeySym k, uint state)
 			continue;
 		if (!match(kp->mask, state))
 			continue;
-		if (IS_SET(MODE_APPKEYPAD) ? kp->appkey < 0 : kp->appkey > 0)
-			continue;
 		if (IS_SET(MODE_APPCURSOR) ? kp->appcursor < 0 : kp->appcursor > 0)
-			continue;
-		if (IS_SET(MODE_CRLF) ? kp->crlf < 0 : kp->crlf > 0)
 			continue;
 
 		return kp->s;
@@ -3922,21 +3676,18 @@ kpress(XEvent *ev)
 	Status status;
 	Shortcut *bp;
 
-	if (IS_SET(MODE_KBDLOCK))
-		return;
-
 	len = XmbLookupString(xw.xic, e, buf, sizeof buf, &ksym, &status);
 	/* 1. shortcuts */
 	for (bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
 		if (ksym == bp->keysym && match(bp->mod, e->state)) {
-			bp->func(&(bp->arg));
+			bp->func();
 			return;
 		}
 	}
 
 	/* 2. custom keys from config.h */
 	if ((customkey = kmap(ksym, e->state))) {
-		ttysend(customkey, strlen(customkey));
+		ttywrite(customkey, strlen(customkey));
 		return;
 	}
 
@@ -3955,7 +3706,7 @@ kpress(XEvent *ev)
 			len = 2;
 		}
 	}
-	ttysend(buf, len);
+	ttywrite(buf, len);
 }
 
 
@@ -4090,28 +3841,21 @@ run(void)
 void
 usage(void)
 {
-	die("usage: %s [-iv] [-c class] [-f font] [-g geometry]"
-	    " [-n name]\n"
-	    "          [-T title] [-t title] [-w windowid]"
-	    " [[-e] command [args ...]]\n"
-	    "       %s [-aiv] [-c class] [-f font] [-g geometry]"
-	    " [-n name] [-o file]\n"
-	    "          [-T title] [-t title] [-w windowid] -l line"
-	    " [stty_args ...]\n", argv0, argv0);
+	die("usage: %s [-v] [-c class] [-f font] [-n name]\n"
+	    "          [-t title] [-w windowid] [[-e] command [args ...]]\n"
+	    "       %s [-v] [-c class] [-f font] [-n name]\n"
+	    "          [-t title] [-w windowid] -l line [stty_args ...]\n", argv0, argv0);
 }
 
 int
 main(int argc, char *argv[])
 {
-	uint cols = 80, rows = 24;
-
 	xw.l = xw.t = 0;
-	xw.isfixed = False;
 	xw.cursor = cursorshape;
 
 	ARGBEGIN {
 	case 'c':
-		opt_class = EARGF(usage());
+		term_class = EARGF(usage());
 		break;
 	case 'e':
 		if (argc > 0)
@@ -4120,21 +3864,13 @@ main(int argc, char *argv[])
 	case 'f':
 		opt_font = EARGF(usage());
 		break;
-	case 'g':
-		xw.gm = XParseGeometry(EARGF(usage()),
-				&xw.l, &xw.t, &cols, &rows);
-		break;
-	case 'i':
-		xw.isfixed = 1;
-		break;
 	case 'l':
 		opt_line = EARGF(usage());
 		break;
 	case 'n':
-		opt_name = EARGF(usage());
+		term_name = EARGF(usage());
 		break;
 	case 't':
-	case 'T':
 		opt_title = EARGF(usage());
 		break;
 	case 'w':
@@ -4156,7 +3892,8 @@ run:
 	}
 	setlocale(LC_CTYPE, "");
 	XSetLocaleModifiers("");
-	tnew(MAX(cols, 1), MAX(rows, 1));
+	tresize(80, 24);
+	treset();
 	xinit();
 	selinit();
 	run();
