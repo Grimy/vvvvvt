@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
+#include <pty.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -38,15 +39,6 @@ char *argv0;
 #define Glyph Glyph_
 #define Font Font_
 
-#if   defined(__linux)
- #include <pty.h>
-#elif defined(__OpenBSD__) || defined(__NetBSD__) || defined(__APPLE__)
- #include <util.h>
-#elif defined(__FreeBSD__) || defined(__DragonFly__)
- #include <libutil.h>
-#endif
-
-
 /* XEMBED messages */
 #define XEMBED_FOCUS_IN  4
 #define XEMBED_FOCUS_OUT 5
@@ -69,9 +61,7 @@ char *argv0;
 #define DEFAULT(a, b)		(a) = (a) ? (a) : (b)
 #define BETWEEN(x, a, b)	((a) <= (x) && (x) <= (b))
 #define DIVCEIL(n, d)		(((n) + ((d) - 1)) / (d))
-#define ISCONTROLC0(c)		((c) < 0x20 || (c) == '\177')
-#define ISCONTROLC1(c)		(BETWEEN(c, 0x80, 0x9f))
-#define ISCONTROL(c)		(ISCONTROLC0(c) || ISCONTROLC1(c))
+#define ISCONTROL(c)		((c) < 0x20 || BETWEEN((c), 0x7f, 0x9f))
 #define ISDELIM(u)		(utf8strchr(worddelimiters, u) != NULL)
 #define LIMIT(x, a, b)		(x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x)
 #define ATTRCMP(a, b)		((a).mode != (b).mode || (a).fg != (b).fg || \
@@ -118,20 +108,16 @@ enum cursor_state {
 
 enum term_mode {
 	MODE_WRAP        = 1 << 0,
-	MODE_ALTSCREEN   = 1 << 3,
-	MODE_MOUSEBTN    = 1 << 5,
-	MODE_MOUSEMOTION = 1 << 6,
-	MODE_REVERSE     = 1 << 7,
-	MODE_HIDE        = 1 << 9,
-	MODE_APPCURSOR   = 1 << 11,
-	MODE_MOUSESGR    = 1 << 12,
-	MODE_8BIT        = 1 << 13,
-	MODE_BLINK       = 1 << 14,
-	MODE_FBLINK      = 1 << 15,
-	MODE_FOCUS       = 1 << 16,
-	MODE_MOUSEX10    = 1 << 17,
-	MODE_MOUSEMANY   = 1 << 18,
-	MODE_BRCKTPASTE  = 1 << 19,
+	MODE_ALTSCREEN   = 1 << 1,
+	MODE_MOUSEBTN    = 1 << 2,
+	MODE_MOUSEMOTION = 1 << 3,
+	MODE_HIDE        = 1 << 4,
+	MODE_APPCURSOR   = 1 << 5,
+	MODE_MOUSESGR    = 1 << 6,
+	MODE_FOCUS       = 1 << 7,
+	MODE_MOUSEX10    = 1 << 8,
+	MODE_MOUSEMANY   = 1 << 9,
+	MODE_BRCKTPASTE  = 1 << 10,
 	MODE_MOUSE       = MODE_MOUSEBTN|MODE_MOUSEMOTION|MODE_MOUSEX10\
 	                  |MODE_MOUSEMANY,
 };
@@ -140,9 +126,6 @@ enum escape_state {
 	ESC_START      = 1,
 	ESC_CSI        = 2,
 	ESC_STR        = 4,  /* DCS, OSC, PM, APC */
-	ESC_ALTCHARSET = 8,
-	ESC_STR_END    = 16, /* a final string was encountered */
-	ESC_TEST       = 32, /* Enter in test mode */
 };
 
 enum window_state {
@@ -197,21 +180,10 @@ typedef struct {
 typedef struct {
 	char buf[ESC_BUF_SIZ]; /* raw string */
 	int len;               /* raw string length */
-	char priv;
 	int arg[ESC_ARG_SIZ];
 	int narg;              /* nb of args */
 	char mode[2];
 } CSIEscape;
-
-/* STR Escape sequence structs */
-/* ESC type [[ [<priv>] <arg> [;]] <mode>] ESC '\' */
-typedef struct {
-	char type;             /* ESC type ... */
-	char buf[STR_BUF_SIZ]; /* raw string */
-	int len;               /* raw string length */
-	char *args[STR_ARG_SIZ];
-	int narg;              /* nb of args */
-} STREscape;
 
 /* Purely graphic info */
 typedef struct {
@@ -336,19 +308,12 @@ static void run(void);
 static void csidump(void);
 static void csihandle(void);
 static void csiparse(void);
-static void csireset(void);
 static int eschandle(uchar);
-static void strdump(void);
-static void strhandle(void);
-static void strparse(void);
-static void strreset(void);
 
 static void tclearregion(int, int, int, int);
 static void tcursor(int);
 static void tdeletechar(int);
-static void tdeleteline(int);
 static void tinsertblank(int);
-static void tinsertblankline(int);
 static int tlinelen(int);
 static void tmoveto(int, int);
 static void tmoveato(int, int);
@@ -364,17 +329,15 @@ static void tsetchar(Rune, Glyph *, int, int);
 static void tsetscroll(int, int);
 static void tswapscreen(void);
 static void tsetdirt(int, int);
-static void tsetmode(int, int, int *, int);
+static void tsetmode(int, int *, int);
 static void tfulldirt(void);
 static void tcontrolcode(uchar );
-static void tdectest(char );
 static int32_t tdefcolor(int *, int *, int);
 static inline int match(uint, uint);
 static void ttynew(void);
 static size_t ttyread(void);
 static void ttyresize(void);
 static void ttywrite(const char *, size_t);
-static void tstrsequence(uchar);
 
 static inline ushort sixd_to_16bit(int);
 static int xmakeglyphfontspecs(XftGlyphFontSpec *, const Glyph *, int, int, int);
@@ -385,13 +348,11 @@ static void xclear(int, int, int, int);
 static void xdrawcursor(void);
 static void xinit(void);
 static void xloadcols(void);
-static int xsetcolorname(int, const char *);
 static int xloadfont(Font *, FcPattern *);
 static void xloadfonts(char *, double);
 static void xsettitle(char *);
 static void xresettitle(void);
 static void xsetpointermotion(int);
-static void xseturgency(int);
 static void xsetsel(char *, Time);
 static void xresize(int, int);
 
@@ -447,11 +408,7 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[MotionNotify] = bmotion,
 	[ButtonPress] = bpress,
 	[ButtonRelease] = brelease,
-/*
- * Uncomment if you want the selection to disappear when you select something
- * different in another window.
- */
-/*	[SelectionClear] = selclear, */
+	[SelectionClear] = selclear,
 	[SelectionNotify] = selnotify,
 /*
  * PropertyNotify is only turned on when there is some INCR transfer happening
@@ -466,7 +423,6 @@ static DC dc;
 static XWindow xw;
 static Term term;
 static CSIEscape csiescseq;
-static STREscape strescseq;
 static int cmdfd;
 static pid_t pid;
 static Selection sel;
@@ -500,10 +456,6 @@ typedef struct {
 	int flags;
 	Rune unicodep;
 } Fontcache;
-
-/* Fontcache is an array now. A new font will be appended to the array. */
-static Fontcache frc[16];
-static int frclen = 0;
 
 void *
 xmalloc(size_t len)
@@ -760,26 +712,14 @@ selsnap(int *x, int *y, int direction)
 		break;
 	case SNAP_LINE:
 		/*
-		 * Snap around if the the previous line or the current one
+		 * Snap around if the previous line or the current one
 		 * has set ATTR_WRAP at its end. Then the whole next or
 		 * previous line will be selected.
 		 */
 		*x = (direction < 0) ? 0 : term.col - 1;
-		if (direction < 0) {
-			for (; *y > 0; *y += direction) {
-				if (!(TLINE(*y-1)[term.col-1].mode
-						& ATTR_WRAP)) {
-					break;
-				}
-			}
-		} else if (direction > 0) {
-			for (; *y < term.row-1; *y += direction) {
-				if (!(TLINE(*y)[term.col-1].mode
-						& ATTR_WRAP)) {
-					break;
-				}
-			}
-		}
+		for (; BETWEEN(*y, 0, term.row - 1); *y += direction)
+			if (!(TLINE(*y)[term.col-1].mode & ATTR_WRAP))
+				break;
 		break;
 	}
 }
@@ -980,13 +920,13 @@ selnotify(XEvent *e)
 	incratom = XInternAtom(xw.dpy, "INCR", 0);
 
 	ofs = 0;
-	if (e->type == SelectionNotify) {
+	if (e->type == SelectionNotify)
 		property = e->xselection.property;
-	} else if(e->type == PropertyNotify) {
+	else if (e->type == PropertyNotify)
 		property = e->xproperty.atom;
-	} else {
+	else
 		return;
-	}
+
 	if (property == None)
 		return;
 
@@ -1405,7 +1345,6 @@ ttywrite(const char *s, size_t n)
 	 * Remember that we are using a pty, which might be a modem line.
 	 * Writing too much will clog the line. That's why we are doing this
 	 * dance.
-	 * FIXME: Migrate the world to Plan 9.
 	 */
 	while (n > 0) {
 		FD_ZERO(&wfd);
@@ -1658,7 +1597,6 @@ csiparse(void)
 
 	csiescseq.narg = 0;
 	if (*p == '?') {
-		csiescseq.priv = 1;
 		p++;
 	}
 
@@ -1794,20 +1732,6 @@ tinsertblank(int n)
 
 	memmove(&line[dst], &line[src], size * sizeof(Glyph));
 	tclearregion(src, term.c.y, dst - 1, term.c.y);
-}
-
-void
-tinsertblankline(int n)
-{
-	if (BETWEEN(term.c.y, term.top, term.bot))
-		tscrolldown(term.c.y, n, 0);
-}
-
-void
-tdeleteline(int n)
-{
-	if (BETWEEN(term.c.y, term.top, term.bot))
-		tscrollup(term.c.y, n, 0);
 }
 
 int32_t
@@ -1970,21 +1894,15 @@ tsetscroll(int t, int b)
 }
 
 void
-tsetmode(int priv, int set, int *args, int narg)
+tsetmode(int set, int *args, int narg)
 {
-	int *lim, mode;
+	int *lim;
 	int alt;
 
 	for (lim = args + narg; args < lim; ++args) {
-		switch (priv ? *args : -*args) {
+		switch (*args) {
 		case 1: /* DECCKM -- Cursor key */
 			MODBIT(term.mode, set, MODE_APPCURSOR);
-			break;
-		case 5: /* DECSCNM -- Reverse video */
-			mode = term.mode;
-			MODBIT(term.mode, set, MODE_REVERSE);
-			if (mode != term.mode)
-				redraw();
 			break;
 		case 6: /* DECOM -- Origin */
 			MODBIT(term.c.state, set, CURSOR_ORIGIN);
@@ -2021,9 +1939,6 @@ tsetmode(int priv, int set, int *args, int narg)
 			break;
 		case 1006: /* 1006: extended reporting mode */
 			MODBIT(term.mode, set, MODE_MOUSESGR);
-			break;
-		case 1034:
-			MODBIT(term.mode, set, MODE_8BIT);
 			break;
 		case 47:
 		case 1047:
@@ -2168,14 +2083,16 @@ csihandle(void)
 		break;
 	case 'L': /* IL -- Insert <n> blank lines */
 		DEFAULT(csiescseq.arg[0], 1);
-		tinsertblankline(csiescseq.arg[0]);
+		if (BETWEEN(term.c.y, term.top, term.bot))
+			tscrolldown(term.c.y, csiescseq.arg[0], 0);
 		break;
 	case 'l': /* RM -- Reset Mode */
-		tsetmode(csiescseq.priv, 0, csiescseq.arg, csiescseq.narg);
+		tsetmode(0, csiescseq.arg, csiescseq.narg);
 		break;
 	case 'M': /* DL -- Delete <n> lines */
 		DEFAULT(csiescseq.arg[0], 1);
-		tdeleteline(csiescseq.arg[0]);
+		if (BETWEEN(term.c.y, term.top, term.bot))
+			tscrollup(term.c.y, csiescseq.arg[0], 0);
 		break;
 	case 'X': /* ECH -- Erase <n> char */
 		DEFAULT(csiescseq.arg[0], 1);
@@ -2195,27 +2112,22 @@ csihandle(void)
 		tmoveato(term.c.x, csiescseq.arg[0]-1);
 		break;
 	case 'h': /* SM -- Set terminal mode */
-		tsetmode(csiescseq.priv, 1, csiescseq.arg, csiescseq.narg);
+		tsetmode(1, csiescseq.arg, csiescseq.narg);
 		break;
 	case 'm': /* SGR -- Terminal attribute (color) */
 		tsetattr(csiescseq.arg, csiescseq.narg);
 		break;
 	case 'n': /* DSR – Device Status Report (cursor position) */
-		if (csiescseq.arg[0] == 6) {
-			len = snprintf(buf, sizeof(buf),"\033[%i;%iR",
-					term.c.y+1, term.c.x+1);
-			ttywrite(buf, len);
-		}
+		if (csiescseq.arg[0] != 6)
+			goto unknown;
+		len = snprintf(buf, sizeof(buf),"\033[%i;%iR", term.c.y+1, term.c.x+1);
+		ttywrite(buf, len);
 		break;
 	case 'r': /* DECSTBM -- Set Scrolling Region */
-		if (csiescseq.priv) {
-			goto unknown;
-		} else {
-			DEFAULT(csiescseq.arg[0], 1);
-			DEFAULT(csiescseq.arg[1], term.row);
-			tsetscroll(csiescseq.arg[0]-1, csiescseq.arg[1]-1);
-			tmoveato(0, 0);
-		}
+		DEFAULT(csiescseq.arg[0], 1);
+		DEFAULT(csiescseq.arg[1], term.row);
+		tsetscroll(csiescseq.arg[0]-1, csiescseq.arg[1]-1);
+		tmoveato(0, 0);
 		break;
 	case 's': /* DECSC -- Save cursor position (ANSI.SYS) */
 		tcursor(CURSOR_SAVE);
@@ -2223,18 +2135,13 @@ csihandle(void)
 	case 'u': /* DECRC -- Restore cursor position (ANSI.SYS) */
 		tcursor(CURSOR_LOAD);
 		break;
-	case ' ':
-		switch (csiescseq.mode[1]) {
-		case 'q': /* DECSCUSR -- Set Cursor Style */
-			DEFAULT(csiescseq.arg[0], 1);
-			if (!BETWEEN(csiescseq.arg[0], 0, 6)) {
-				goto unknown;
-			}
-			xw.cursor = csiescseq.arg[0];
-			break;
-		default:
+	case ' ': /* DECSCUSR -- Set Cursor Style */
+		if (csiescseq.mode[1] != 'q')
 			goto unknown;
-		}
+		DEFAULT(csiescseq.arg[0], 1);
+		if (!BETWEEN(csiescseq.arg[0], 0, 6))
+			goto unknown;
+		xw.cursor = csiescseq.arg[0];
 		break;
 	}
 }
@@ -2248,130 +2155,18 @@ csidump(void)
 	printf("ESC[");
 	for (i = 0; i < csiescseq.len; i++) {
 		c = csiescseq.buf[i] & 0xff;
-		if (isprint(c)) {
+		if (isprint(c))
 			putchar(c);
-		} else if (c == '\n') {
+		else if (c == '\n')
 			printf("(\\n)");
-		} else if (c == '\r') {
+		else if (c == '\r')
 			printf("(\\r)");
-		} else if (c == 0x1b) {
+		else if (c == 0x1b)
 			printf("(\\e)");
-		} else {
+		else
 			printf("(%02x)", c);
-		}
 	}
 	putchar('\n');
-}
-
-void
-csireset(void)
-{
-	memset(&csiescseq, 0, sizeof(csiescseq));
-}
-
-void
-strhandle(void)
-{
-	char *p = NULL;
-	int j, narg, par;
-
-	term.esc &= ~(ESC_STR_END|ESC_STR);
-	strparse();
-	par = (narg = strescseq.narg) ? atoi(strescseq.args[0]) : 0;
-
-	switch (strescseq.type) {
-	case ']': /* OSC -- Operating System Command */
-		switch (par) {
-		case 0:
-		case 1:
-		case 2:
-			if (narg > 1)
-				xsettitle(strescseq.args[1]);
-			return;
-		case 4: /* color set */
-			if (narg < 3)
-				break;
-			p = strescseq.args[2];
-			/* FALLTHROUGH */
-		case 104: /* color reset, here p = NULL */
-			j = (narg > 1) ? atoi(strescseq.args[1]) : -1;
-			if (xsetcolorname(j, p)) {
-				fprintf(stderr, "erresc: invalid color %s\n", p);
-			} else {
-				/*
-				 * TODO if defaultbg color is changed, borders
-				 * are dirty
-				 */
-				redraw();
-			}
-			return;
-		}
-		break;
-	case 'k': /* old title set compatibility */
-		xsettitle(strescseq.args[0]);
-		return;
-	case 'P': /* DCS -- Device Control String */
-	case '_': /* APC -- Application Program Command */
-	case '^': /* PM -- Privacy Message */
-		return;
-	}
-
-	fprintf(stderr, "erresc: unknown str ");
-	strdump();
-}
-
-void
-strparse(void)
-{
-	int c;
-	char *p = strescseq.buf;
-
-	strescseq.narg = 0;
-	strescseq.buf[strescseq.len] = '\0';
-
-	if (*p == '\0')
-		return;
-
-	while (strescseq.narg < STR_ARG_SIZ) {
-		strescseq.args[strescseq.narg++] = p;
-		while ((c = *p) != ';' && c != '\0')
-			++p;
-		if (c == '\0')
-			return;
-		*p++ = '\0';
-	}
-}
-
-void
-strdump(void)
-{
-	int i;
-	uint c;
-
-	printf("ESC%c", strescseq.type);
-	for (i = 0; i < strescseq.len; i++) {
-		c = strescseq.buf[i] & 0xff;
-		if (c == '\0') {
-			return;
-		} else if (isprint(c)) {
-			putchar(c);
-		} else if (c == '\n') {
-			printf("(\\n)");
-		} else if (c == '\r') {
-			printf("(\\r)");
-		} else if (c == 0x1b) {
-			printf("(\\e)");
-		} else {
-			printf("(%02x)", c);
-		}
-	}
-	printf("ESC\\\n");
-}
-
-void
-strreset(void)
-{
-	memset(&strescseq, 0, sizeof(strescseq));
 }
 
 void
@@ -2392,139 +2187,45 @@ tputtab(int n)
 }
 
 void
-tdectest(char c)
-{
-	int x, y;
-
-	if (c == '8') { /* DEC screen alignment test. */
-		for (x = 0; x < term.col; ++x) {
-			for (y = 0; y < term.row; ++y)
-				tsetchar('E', &term.c.attr, x, y);
-		}
-	}
-}
-
-void
-tstrsequence(uchar c)
-{
-	switch (c) {
-	case 0x90:   /* DCS -- Device Control String */
-		c = 'P';
-		break;
-	case 0x9f:   /* APC -- Application Program Command */
-		c = '_';
-		break;
-	case 0x9e:   /* PM -- Privacy Message */
-		c = '^';
-		break;
-	case 0x9d:   /* OSC -- Operating System Command */
-		c = ']';
-		break;
-	}
-	strreset();
-	strescseq.type = c;
-	term.esc |= ESC_STR;
-}
-
-void
 tcontrolcode(uchar ascii)
 {
 	switch (ascii) {
 	case '\t':   /* HT */
 		tputtab(1);
-		return;
+		break;
 	case '\b':   /* BS */
 		tmoveto(term.c.x-1, term.c.y);
-		return;
+		break;
 	case '\r':   /* CR */
 		tmoveto(0, term.c.y);
-		return;
+		break;
 	case '\f':   /* LF */
 	case '\v':   /* VT */
 	case '\n':   /* LF */
-		/* go to first col if the mode is set */
 		tnewline(0);
-		return;
+		break;
 	case '\a':   /* BEL */
-		if (term.esc & ESC_STR_END) {
-			/* backwards compatibility to xterm */
-			strhandle();
-		} else {
-			if (!(xw.state & WIN_FOCUSED))
-				xseturgency(1);
-			if (bellvolume)
-				XkbBell(xw.dpy, xw.win, bellvolume, (Atom)NULL);
-		}
+		if (!(xw.state & WIN_FOCUSED))
+			XkbBell(xw.dpy, xw.win, bellvolume, (Atom) NULL);
 		break;
 	case '\033': /* ESC */
-		csireset();
-		term.esc &= ~(ESC_CSI|ESC_ALTCHARSET|ESC_TEST);
+		memset(&csiescseq, 0, sizeof(csiescseq));
+		term.esc &= ~ESC_CSI;
 		term.esc |= ESC_START;
-		return;
+		break;
 	case '\016': /* SO (LS1 -- Locking shift 1) */
 		term.charset = 1;
-		return;
+		break;
 	case '\017': /* SI (LS0 -- Locking shift 0) */
 		term.charset = 0;
-		return;
+		break;
 	case '\032': /* SUB */
 		tsetchar('?', &term.c.attr, term.c.x, term.c.y);
 	case '\030': /* CAN */
-		csireset();
+		memset(&csiescseq, 0, sizeof(csiescseq));
+		term.esc &= ~ESC_STR;
 		break;
-	case '\005': /* ENQ (IGNORED) */
-	case '\000': /* NUL (IGNORED) */
-	case '\021': /* XON (IGNORED) */
-	case '\023': /* XOFF (IGNORED) */
-	case 0177:   /* DEL (IGNORED) */
-		return;
-	case 0x80:   /* TODO: PAD */
-	case 0x81:   /* TODO: HOP */
-	case 0x82:   /* TODO: BPH */
-	case 0x83:   /* TODO: NBH */
-	case 0x84:   /* TODO: IND */
-		break;
-	case 0x85:   /* NEL -- Next line */
-		tnewline(1); /* always go to first col */
-		break;
-	case 0x86:   /* TODO: SSA */
-	case 0x87:   /* TODO: ESA */
-		break;
-	case 0x88:   /* HTS -- Horizontal tab stop */
-		term.tabs[term.c.x] = 1;
-		break;
-	case 0x89:   /* TODO: HTJ */
-	case 0x8a:   /* TODO: VTS */
-	case 0x8b:   /* TODO: PLD */
-	case 0x8c:   /* TODO: PLU */
-	case 0x8d:   /* TODO: RI */
-	case 0x8e:   /* TODO: SS2 */
-	case 0x8f:   /* TODO: SS3 */
-	case 0x91:   /* TODO: PU1 */
-	case 0x92:   /* TODO: PU2 */
-	case 0x93:   /* TODO: STS */
-	case 0x94:   /* TODO: CCH */
-	case 0x95:   /* TODO: MW */
-	case 0x96:   /* TODO: SPA */
-	case 0x97:   /* TODO: EPA */
-	case 0x98:   /* TODO: SOS */
-	case 0x99:   /* TODO: SGCI */
-		break;
-	case 0x9a:   /* DECID -- Identify Terminal */
-		ttywrite(vtiden, sizeof(vtiden) - 1);
-		break;
-	case 0x9b:   /* TODO: CSI */
-	case 0x9c:   /* TODO: ST */
-		break;
-	case 0x90:   /* DCS -- Device Control String */
-	case 0x9d:   /* OSC -- Operating System Command */
-	case 0x9e:   /* PM -- Privacy Message */
-	case 0x9f:   /* APC -- Application Program Command */
-		tstrsequence(ascii);
-		return;
 	}
-	/* only CAN, SUB, \a and C1 chars interrupt a sequence */
-	term.esc &= ~(ESC_STR_END|ESC_STR);
 }
 
 /*
@@ -2538,24 +2239,21 @@ eschandle(uchar ascii)
 	case '[':
 		term.esc |= ESC_CSI;
 		return 0;
-	case '#':
-		term.esc |= ESC_TEST;
-		return 0;
 	case 'P': /* DCS -- Device Control String */
 	case '_': /* APC -- Application Program Command */
 	case '^': /* PM -- Privacy Message */
 	case ']': /* OSC -- Operating System Command */
 	case 'k': /* old title set compatibility */
-		tstrsequence(ascii);
+		term.esc |= ESC_STR;
 		return 0;
 	case 'n': /* LS2 -- Locking shift 2 */
 	case 'o': /* LS3 -- Locking shift 3 */
+	case '\\': /* ST -- String Terminator */
 		return 1;
 	case '(': /* GZD4 -- set primary charset G0 */
 	case ')': /* G1D4 -- set secondary charset G1 */
 	case '*': /* G2D4 -- set tertiary charset G2 */
 	case '+': /* G3D4 -- set quaternary charset G3 */
-		term.esc |= ESC_ALTCHARSET;
 		return 0;
 	case 'D': /* IND -- Linefeed */
 		if (term.c.y == term.bot)
@@ -2589,10 +2287,6 @@ eschandle(uchar ascii)
 	case '8': /* DECRC -- Restore Cursor */
 		tcursor(CURSOR_LOAD);
 		return 1;
-	case '\\': /* ST -- String Terminator */
-		if (term.esc & ESC_STR_END)
-			strhandle();
-		return 1;
 	default:
 		fprintf(stderr, "erresc: unknown sequence ESC 0x%02X '%c'\n",
 			(uchar) ascii, isprint(ascii) ? ascii : '.');
@@ -2605,47 +2299,13 @@ tputc(Rune u)
 {
 	char c[UTF_SIZ];
 	int control;
-	int width, len;
+	int width;
 	Glyph *gp;
 
 	control = ISCONTROL(u);
-	len = utf8encode(u, c);
 	if (!control && (width = wcwidth(u)) == -1) {
 		memcpy(c, "\357\277\275", 4); /* UTF_INVALID */
 		width = 1;
-	}
-
-	/*
-	 * STR sequence must be checked before anything else
-	 * because it uses all following characters until it
-	 * receives a ESC, a SUB, a ST or any other C1 control
-	 * character.
-	 */
-	if (term.esc & ESC_STR) {
-		if (u == '\a' || u == 030 || u == 032 || u == 033 ||
-		   ISCONTROLC1(u)) {
-			term.esc &= ~(ESC_START|ESC_STR);
-			term.esc |= ESC_STR_END;
-		} else if (strescseq.len + len < sizeof(strescseq.buf) - 1) {
-			memmove(&strescseq.buf[strescseq.len], c, len);
-			strescseq.len += len;
-			return;
-		} else {
-		/*
-		 * Here is a bug in terminals. If the user never sends
-		 * some code to stop the str or esc command, then st
-		 * will stop responding. But this is better than
-		 * silently failing with unknown characters. At least
-		 * then users will report back.
-		 *
-		 * In the case users ever get fixed, here is the code:
-		 */
-		/*
-		 * term.esc = 0;
-		 * strhandle();
-		 */
-			return;
-		}
 	}
 
 	/*
@@ -2654,36 +2314,31 @@ tputc(Rune u)
 	 * they must not cause conflicts with sequences.
 	 */
 	if (control) {
+		term.esc &= ~ESC_STR;
 		tcontrolcode(u);
-		/*
-		 * control codes are not shown ever
-		 */
-		return;
-	} else if (term.esc & ESC_START) {
-		if (term.esc & ESC_CSI) {
-			csiescseq.buf[csiescseq.len++] = u;
-			if (BETWEEN(u, 0x40, 0x7E)
-					|| csiescseq.len >= \
-					sizeof(csiescseq.buf)-1) {
-				term.esc = 0;
-				csiparse();
-				csihandle();
-			}
-			return;
-		} else if (term.esc & ESC_TEST) {
-			tdectest(u);
-		} else {
-			if (!eschandle(u))
-				return;
-			/* sequence already finished */
-		}
-		term.esc = 0;
-		/*
-		 * All characters which form part of a sequence are not
-		 * printed
-		 */
 		return;
 	}
+
+	if (term.esc & ESC_STR)
+		return;
+
+	if (term.esc & ESC_CSI) {
+		csiescseq.buf[csiescseq.len++] = u;
+		if (BETWEEN(u, 0x40, 0x7E) || csiescseq.len >= sizeof(csiescseq.buf) - 1) {
+			term.esc = 0;
+			csiparse();
+			csihandle();
+		}
+		return;
+	}
+
+	if (term.esc & ESC_START) {
+		if (!eschandle(u))
+			return;
+		term.esc = 0;
+		return;
+	}
+
 	if (sel.ob.x != -1 && BETWEEN(term.c.y, sel.ob.y, sel.oe.y))
 		selclear(NULL);
 
@@ -2708,11 +2363,10 @@ tputc(Rune u)
 			gp[1].mode = ATTR_WDUMMY;
 		}
 	}
-	if (term.c.x+width < term.col) {
+	if (term.c.x+width < term.col)
 		tmoveto(term.c.x+width, term.c.y);
-	} else {
+	else
 		term.c.state |= CURSOR_WRAPNEXT;
-	}
 }
 
 void
@@ -2874,33 +2528,11 @@ xloadcols(void)
 	loaded = 1;
 }
 
-int
-xsetcolorname(int x, const char *name)
-{
-	Color ncolor;
-
-	if (!BETWEEN(x, 0, LEN(dc.col)))
-		return 1;
-
-
-	if (!xloadcolor(x, name, &ncolor))
-		return 1;
-
-	XftColorFree(xw.dpy, xw.vis, xw.cmap, &dc.col[x]);
-	dc.col[x] = ncolor;
-
-	return 0;
-}
-
-/*
- * Absolute coordinates.
- */
+/* Absolute coordinates. */
 void
 xclear(int x1, int y1, int x2, int y2)
 {
-	XftDrawRect(xw.draw,
-			&dc.col[IS_SET(MODE_REVERSE)? defaultfg : defaultbg],
-			x1, y1, x2-x1, y2-y1);
+	XftDrawRect(xw.draw, &dc.col[defaultbg], x1, y1, x2-x1, y2-y1);
 }
 
 void
@@ -3034,7 +2666,7 @@ xinit(void)
 	if (!FcInit())
 		die("Could not init fontconfig.\n");
 
-	usedfont = (opt_font == NULL)? font : opt_font;
+	usedfont = (opt_font == NULL) ? font : opt_font;
 	xloadfonts(usedfont, 0);
 
 	/* colors */
@@ -3134,15 +2766,10 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 	float winx = borderpx + x * xw.cw, winy = borderpx + y * xw.ch, xp, yp;
 	ushort mode, prevmode = USHRT_MAX;
 	Font *font = &dc.font;
-	int frcflags = FRC_NORMAL;
 	float runewidth = xw.cw;
 	Rune rune;
 	FT_UInt glyphidx;
-	FcResult fcres;
-	FcPattern *fcpattern, *fontpattern;
-	FcFontSet *fcsets[] = { NULL };
-	FcCharSet *fccharset;
-	int i, f, numspecs = 0;
+	int i, numspecs = 0;
 
 	for (i = 0, xp = winx, yp = winy + font->ascent; i < len; ++i) {
 		/* Fetch rune and mode for current glyph. */
@@ -3157,99 +2784,22 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 		if (prevmode != mode) {
 			prevmode = mode;
 			font = &dc.font;
-			frcflags = FRC_NORMAL;
 			runewidth = xw.cw * ((mode & ATTR_WIDE) ? 2.0f : 1.0f);
-			if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD)) {
+			if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD))
 				font = &dc.ibfont;
-				frcflags = FRC_ITALICBOLD;
-			} else if (mode & ATTR_ITALIC) {
+			else if (mode & ATTR_ITALIC)
 				font = &dc.ifont;
-				frcflags = FRC_ITALIC;
-			} else if (mode & ATTR_BOLD) {
+			else if (mode & ATTR_BOLD)
 				font = &dc.bfont;
-				frcflags = FRC_BOLD;
-			}
 			yp = winy + font->ascent;
 		}
 
 		/* Lookup character index with default font. */
 		glyphidx = XftCharIndex(xw.dpy, font->match, rune);
-		if (glyphidx) {
-			specs[numspecs].font = font->match;
-			specs[numspecs].glyph = glyphidx;
-			specs[numspecs].x = (short)xp;
-			specs[numspecs].y = (short)yp;
-			xp += runewidth;
-			numspecs++;
+		if (!glyphidx)
 			continue;
-		}
 
-		/* Fallback on font cache, search the font cache for match. */
-		for (f = 0; f < frclen; f++) {
-			glyphidx = XftCharIndex(xw.dpy, frc[f].font, rune);
-			/* Everything correct. */
-			if (glyphidx && frc[f].flags == frcflags)
-				break;
-			/* We got a default font for a not found glyph. */
-			if (!glyphidx && frc[f].flags == frcflags
-					&& frc[f].unicodep == rune) {
-				break;
-			}
-		}
-
-		/* Nothing was found. Use fontconfig to find matching font. */
-		if (f >= frclen) {
-			if (!font->set)
-				font->set = FcFontSort(0, font->pattern,
-				                       1, 0, &fcres);
-			fcsets[0] = font->set;
-
-			/*
-			 * Nothing was found in the cache. Now use
-			 * some dozen of Fontconfig calls to get the
-			 * font for one single character.
-			 *
-			 * Xft and fontconfig are design failures.
-			 */
-			fcpattern = FcPatternDuplicate(font->pattern);
-			fccharset = FcCharSetCreate();
-
-			FcCharSetAddChar(fccharset, rune);
-			FcPatternAddCharSet(fcpattern, FC_CHARSET,
-					fccharset);
-			FcPatternAddBool(fcpattern, FC_SCALABLE, 1);
-
-			FcConfigSubstitute(0, fcpattern,
-					FcMatchPattern);
-			FcDefaultSubstitute(fcpattern);
-
-			fontpattern = FcFontSetMatch(0, fcsets, 1,
-					fcpattern, &fcres);
-
-			/*
-			 * Overwrite or create the new cache entry.
-			 */
-			if (frclen >= LEN(frc)) {
-				frclen = LEN(frc) - 1;
-				XftFontClose(xw.dpy, frc[frclen].font);
-				frc[frclen].unicodep = 0;
-			}
-
-			frc[frclen].font = XftFontOpenPattern(xw.dpy,
-					fontpattern);
-			frc[frclen].flags = frcflags;
-			frc[frclen].unicodep = rune;
-
-			glyphidx = XftCharIndex(xw.dpy, frc[frclen].font, rune);
-
-			f = frclen;
-			frclen++;
-
-			FcPatternDestroy(fcpattern);
-			FcCharSetDestroy(fccharset);
-		}
-
-		specs[numspecs].font = frc[f].font;
+		specs[numspecs].font = font->match;
 		specs[numspecs].glyph = glyphidx;
 		specs[numspecs].x = (short)xp;
 		specs[numspecs].y = (short)yp;
@@ -3266,7 +2816,7 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	int charlen = len * ((base.mode & ATTR_WIDE) ? 2 : 1);
 	int winx = borderpx + x * xw.cw, winy = borderpx + y * xw.ch,
 	    width = charlen * xw.cw;
-	Color *fg, *bg, *temp, revfg, revbg, truefg, truebg;
+	Color *fg, *bg, *temp, truefg, truebg;
 	XRenderColor colfg, colbg;
 	XRectangle r;
 
@@ -3292,36 +2842,6 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 		bg = &dc.col[base.bg];
 	}
 
-	/* Change basic system colors [0-7] to bright system colors [8-15] */
-	if ((base.mode & ATTR_BOLD_FAINT) == ATTR_BOLD && base.fg < 8)
-		fg = &dc.col[base.fg + 8];
-
-	if (IS_SET(MODE_REVERSE)) {
-		if (fg == &dc.col[defaultfg]) {
-			fg = &dc.col[defaultbg];
-		} else {
-			colfg.red = ~fg->color.red;
-			colfg.green = ~fg->color.green;
-			colfg.blue = ~fg->color.blue;
-			colfg.alpha = fg->color.alpha;
-			XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colfg,
-					&revfg);
-			fg = &revfg;
-		}
-
-		if (bg == &dc.col[defaultbg]) {
-			bg = &dc.col[defaultfg];
-		} else {
-			colbg.red = ~bg->color.red;
-			colbg.green = ~bg->color.green;
-			colbg.blue = ~bg->color.blue;
-			colbg.alpha = bg->color.alpha;
-			XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colbg,
-					&revbg);
-			bg = &revbg;
-		}
-	}
-
 	if (base.mode & ATTR_REVERSE) {
 		temp = fg;
 		fg = bg;
@@ -3332,8 +2852,6 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 		colfg.red = fg->color.red / 2;
 		colfg.green = fg->color.green / 2;
 		colfg.blue = fg->color.blue / 2;
-		XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colfg, &revfg);
-		fg = &revfg;
 	}
 
 	if (base.mode & ATTR_INVISIBLE)
@@ -3350,7 +2868,7 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	}
 	if (y == 0)
 		xclear(winx, 0, winx + width, borderpx);
-	if (y == term.row-1)
+	if (y == term.row - 1)
 		xclear(winx, winy + xw.ch, winx + width, xw.h);
 
 	/* Clean up the region we want to draw to. */
@@ -3367,15 +2885,11 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
 
 	/* Render underline and strikethrough. */
-	if (base.mode & ATTR_UNDERLINE) {
-		XftDrawRect(xw.draw, fg, winx, winy + dc.font.ascent + 1,
-				width, 1);
-	}
+	if (base.mode & ATTR_UNDERLINE)
+		XftDrawRect(xw.draw, fg, winx, winy + dc.font.ascent + 1, width, 1);
 
-	if (base.mode & ATTR_STRUCK) {
-		XftDrawRect(xw.draw, fg, winx, winy + 2 * dc.font.ascent / 3,
-				width, 1);
-	}
+	if (base.mode & ATTR_STRUCK)
+		XftDrawRect(xw.draw, fg, winx, winy + 2 * dc.font.ascent / 3, width, 1);
 
 	/* Reset clip to none. */
 	XftDrawSetClip(xw.draw, 0);
@@ -3395,15 +2909,11 @@ void
 xdrawcursor(void)
 {
 	static int oldx = 0, oldy = 0;
-	int curx;
-	Glyph g = {' ', ATTR_NULL, defaultbg, defaultfg}, og;
-	int ena_sel = sel.ob.x != -1 && sel.alt == IS_SET(MODE_ALTSCREEN);
-	Color drawcol;
+	int curx = term.c.x;
+	Glyph g = {.u = term.line[term.c.y][term.c.x].u, 0, defaultbg, defaultfg};
 
 	LIMIT(oldx, 0, term.col-1);
 	LIMIT(oldy, 0, term.row-1);
-
-	curx = term.c.x;
 
 	/* adjust position if in dummy */
 	if (term.line[oldy][oldx].mode & ATTR_WDUMMY)
@@ -3412,84 +2922,31 @@ xdrawcursor(void)
 		curx--;
 
 	/* remove the old cursor */
-	og = term.line[oldy][oldx];
-	if (ena_sel && selected(oldx, oldy))
-		og.mode ^= ATTR_REVERSE;
-	xdrawglyph(og, oldx, oldy);
-
-	g.u = term.line[term.c.y][term.c.x].u;
-
-	/*
-	 * Select the right color for the right mode.
-	 */
-	if (IS_SET(MODE_REVERSE)) {
-		g.mode |= ATTR_REVERSE;
-		g.bg = defaultfg;
-		if (ena_sel && selected(term.c.x, term.c.y)) {
-			drawcol = dc.col[defaultfg];
-			g.fg = defaultbg;
-		} else {
-			drawcol = dc.col[defaultbg];
-			g.fg = defaultfg;
-		}
-	} else {
-		if (ena_sel && selected(term.c.x, term.c.y)) {
-			drawcol = dc.col[defaultbg];
-			g.fg = defaultfg;
-			g.bg = defaultbg;
-		} else {
-			drawcol = dc.col[defaultfg];
-		}
-	}
+	xdrawglyph(term.line[oldy][oldx], oldx, oldy);
 
 	if (IS_SET(MODE_HIDE))
 		return;
 
 	/* draw the new one */
-	if (xw.state & WIN_FOCUSED) {
-		switch (xw.cursor) {
-		case 7: /* st extension: snowman */
-			utf8decode("☃", &g.u, UTF_SIZ);
-		case 0: /* Blinking Block */
-		case 1: /* Blinking Block (Default) */
-		case 2: /* Steady Block */
-			g.mode |= term.line[term.c.y][curx].mode & ATTR_WIDE;
-			xdrawglyph(g, term.c.x, term.c.y);
-			break;
-		case 3: /* Blinking Underline */
-		case 4: /* Steady Underline */
-			XftDrawRect(xw.draw, &drawcol,
-					borderpx + curx * xw.cw,
-					borderpx + (term.c.y + 1) * xw.ch - \
-						cursorthickness,
-					xw.cw, cursorthickness);
-			break;
-		case 5: /* Blinking bar */
-		case 6: /* Steady bar */
-			XftDrawRect(xw.draw, &drawcol,
-					borderpx + curx * xw.cw,
-					borderpx + term.c.y * xw.ch,
-					cursorthickness, xw.ch);
-			break;
-		}
-	} else {
-		XftDrawRect(xw.draw, &drawcol,
-				borderpx + curx * xw.cw,
-				borderpx + term.c.y * xw.ch,
-				xw.cw - 1, 1);
-		XftDrawRect(xw.draw, &drawcol,
-				borderpx + curx * xw.cw,
-				borderpx + term.c.y * xw.ch,
-				1, xw.ch - 1);
-		XftDrawRect(xw.draw, &drawcol,
-				borderpx + (curx + 1) * xw.cw - 1,
-				borderpx + term.c.y * xw.ch,
-				1, xw.ch - 1);
-		XftDrawRect(xw.draw, &drawcol,
-				borderpx + curx * xw.cw,
-				borderpx + (term.c.y + 1) * xw.ch - 1,
-				xw.cw, 1);
+	switch ((xw.state & WIN_FOCUSED) ? xw.cursor : 4) {
+	case 0: /* Blinking Block */
+	case 1: /* Blinking Block (Default) */
+	case 2: /* Steady Block */
+		xdrawglyph(g, term.c.x, term.c.y);
+		break;
+	case 3: /* Blinking Underline */
+	case 4: /* Steady Underline */
+		XftDrawRect(xw.draw, &dc.col[defaultfg], borderpx + curx * xw.cw,
+			borderpx + (term.c.y + 1) * xw.ch - 2, xw.cw, 2);
+		break;
+	case 5: /* Blinking bar */
+	case 6: /* Steady bar */
+		XftDrawRect(xw.draw, &dc.col[defaultfg], borderpx + curx * xw.cw,
+			borderpx + term.c.y * xw.ch, 2, xw.ch);
+		break;
 	}
+
+	g.mode |= term.line[term.c.y][curx].mode & ATTR_WIDE;
 	oldx = curx, oldy = term.c.y;
 }
 
@@ -3523,11 +2980,8 @@ void
 draw(void)
 {
 	drawregion(0, 0, term.col, term.row);
-	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, xw.w,
-			xw.h, 0, 0);
-	XSetForeground(xw.dpy, dc.gc,
-			dc.col[IS_SET(MODE_REVERSE)?
-				defaultfg : defaultbg].pixel);
+	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, xw.w, xw.h, 0, 0);
+	XSetForeground(xw.dpy, dc.gc, dc.col[defaultbg].pixel);
 }
 
 void
@@ -3606,16 +3060,6 @@ xsetpointermotion(int set)
 }
 
 void
-xseturgency(int add)
-{
-	XWMHints *h = XGetWMHints(xw.dpy, xw.win);
-
-	MODBIT(h->flags, add, XUrgencyHint);
-	XSetWMHints(xw.dpy, xw.win, h);
-	XFree(h);
-}
-
-void
 focus(XEvent *ev)
 {
 	XFocusChangeEvent *e = &ev->xfocus;
@@ -3626,7 +3070,6 @@ focus(XEvent *ev)
 	if (ev->type == FocusIn) {
 		XSetICFocus(xw.xic);
 		xw.state |= WIN_FOCUSED;
-		xseturgency(0);
 		if (IS_SET(MODE_FOCUS))
 			ttywrite("\033[I", 3);
 	} else {
@@ -3672,7 +3115,6 @@ kpress(XEvent *ev)
 	KeySym ksym;
 	char buf[32], *customkey;
 	int len;
-	Rune c;
 	Status status;
 	Shortcut *bp;
 
@@ -3695,16 +3137,9 @@ kpress(XEvent *ev)
 	if (len == 0)
 		return;
 	if (len == 1 && e->state & Mod1Mask) {
-		if (IS_SET(MODE_8BIT)) {
-			if (*buf < 0177) {
-				c = *buf | 0x80;
-				len = utf8encode(c, buf);
-			}
-		} else {
-			buf[1] = buf[0];
-			buf[0] = '\033';
-			len = 2;
-		}
+		buf[1] = buf[0];
+		buf[0] = '\033';
+		len = 2;
 	}
 	ttywrite(buf, len);
 }
@@ -3718,12 +3153,10 @@ cmessage(XEvent *e)
 	 *  http://standards.freedesktop.org/xembed-spec/xembed-spec-latest.html
 	 */
 	if (e->xclient.message_type == xw.xembed && e->xclient.format == 32) {
-		if (e->xclient.data.l[1] == XEMBED_FOCUS_IN) {
+		if (e->xclient.data.l[1] == XEMBED_FOCUS_IN)
 			xw.state |= WIN_FOCUSED;
-			xseturgency(0);
-		} else if (e->xclient.data.l[1] == XEMBED_FOCUS_OUT) {
+		else if (e->xclient.data.l[1] == XEMBED_FOCUS_OUT)
 			xw.state &= ~WIN_FOCUSED;
-		}
 	} else if (e->xclient.data.l[0] == xw.wmdeletewin) {
 		/* Send SIGHUP to shell */
 		kill(pid, SIGHUP);

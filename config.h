@@ -29,10 +29,7 @@ static char vtiden[] = "\033[?6c";
 static float cwscale = 1.0;
 static float chscale = 1.0;
 
-/*
- * word delimiter string
- *
- */
+/* word delimiter string */
 static char worddelimiters[] = " <>'`\"(){}";
 
 /* selection timeouts (in milliseconds) */
@@ -43,16 +40,8 @@ static unsigned int tripleclicktimeout = 600;
 static unsigned int xfps = 60;
 static unsigned int actionfps = 30;
 
-/*
- * thickness of underline and bar cursors
- */
-static unsigned int cursorthickness = 2;
-
-/*
- * bell volume. It must be a value between -100 and 100. Use 0 for disabling
- * it
- */
-static int bellvolume = 0;
+/* Bell volume. It must be a value between -100 and 100. */
+static int bellvolume = 12;
 
 /* default TERM value */
 static char* term_name = "st-256color";
@@ -85,14 +74,7 @@ static const char *colorname[] = {
 #define defaultfg 15
 #define defaultbg 0
 
-/*
- * Default shape of cursor
- * 2:Underline")
- * 4: Underline ("_")
- * 6: Bar ("|")
- * 7: Snowman ("☃")
- */
-static unsigned int cursorshape = 2;
+static unsigned int cursorshape;
 
 /*
  * Default colour and shape of the mouse cursor
