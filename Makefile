@@ -21,3 +21,8 @@ LDFLAGS += -g ${LIBS}
 st: st.c config.h Makefile
 	@echo CC $@
 	@$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
+
+.PHONY: report
+report: st
+	time perf record ./st perl -E 'say "‽é*" x 1e8'
+	perf report

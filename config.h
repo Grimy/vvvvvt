@@ -27,12 +27,8 @@ static int ch_add = 0;
 /* word delimiter string */
 static char worddelimiters[] = " <>'`\"(){}";
 
-/* selection timeouts (in milliseconds) */
-static unsigned int doubleclicktimeout = 300;
-
 /* frames per second st should at maximum draw to the screen */
-static unsigned int xfps = 60;
-static unsigned int actionfps = 30;
+#define FPS 30
 
 /* Bell volume. It must be a value between -100 and 100. */
 static int bellvolume = 12;
