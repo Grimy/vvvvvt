@@ -14,7 +14,7 @@ LIBS = -L/usr/lib -lc -L/usr/X11R6/lib -lm -lrt -lX11 -lutil -lXft \
 # flags
 CC = clang
 CPPFLAGS = -DVERSION=\"${VERSION}\" -D_XOPEN_SOURCE=600
-CFLAGS += -g -std=c99 -Weverything -Os ${INCS} ${CPPFLAGS}
+CFLAGS += -g -std=c99 -Weverything -fno-inline -Os ${INCS} ${CPPFLAGS}
 CFLAGS += -Wno-sign-compare -Wno-sign-conversion -Wno-missing-noreturn -Wno-format-nonliteral -Wno-deprecated-declarations -Wno-gnu-case-range
 LDFLAGS += -g ${LIBS}
 
@@ -24,5 +24,5 @@ st: st.c config.h Makefile
 
 .PHONY: report
 report: st
-	time perf record ./st perl -E 'say "‽é*" x 1e8'
+	time perf record ./st perl -E 'say "a‽béc*" x 4e7'
 	perf report
