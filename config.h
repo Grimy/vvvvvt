@@ -55,13 +55,6 @@ static const char *colorname[] = {
 #define defaultfg 15
 #define defaultbg 0
 
-/*
- * Default colour and shape of the mouse cursor
- */
-static unsigned int mouseshape = XC_xterm;
-static unsigned int mousefg = 7;
-static unsigned int mousebg = 0;
-
 /* Internal keyboard shortcuts. */
 static Shortcut shortcuts[] = {
 	/* mask                   keysym         function   */
@@ -121,13 +114,3 @@ static Key key[] = {
 	{ XK_Prior,         XK_ANY_MOD,    0,  "\033[5~"   },
 	{ XK_Next,          XK_ANY_MOD,    0,  "\033[6~"   },
 };
-
-/*
- * Printable characters in ASCII, used to estimate the advance width
- * of single wide characters.
- */
-static char ascii_printable[] =
-	" !\"#$%&'()*+,-./0123456789:;<=>?"
-	"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
-	"`abcdefghijklmnopqrstuvwxyz{|}~";
-
