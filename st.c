@@ -79,12 +79,6 @@ enum cursor_movement {
 	CURSOR_LOAD
 };
 
-enum cursor_state {
-	CURSOR_DEFAULT  = 0,
-	CURSOR_WRAPNEXT = 1,
-	CURSOR_ORIGIN   = 2
-};
-
 enum term_mode {
 	MODE_WRAP        = 1 << 0,
 	MODE_ALTSCREEN   = 1 << 1,
@@ -97,6 +91,8 @@ enum term_mode {
 	MODE_MOUSEX10    = 1 << 8,
 	MODE_MOUSEMANY   = 1 << 9,
 	MODE_BRCKTPASTE  = 1 << 10,
+	MODE_ABSMOVE     = 1 << 11,
+	MODE_ALTCHARSET  = 1 << 12,
 	MODE_MOUSE       = MODE_MOUSEBTN|MODE_MOUSEMOTION|MODE_MOUSEX10\
 	                  |MODE_MOUSEMANY,
 };
@@ -230,13 +226,11 @@ static struct {
 	Glyph hist[histsize][LINE_SIZE];     /* history buffer */
 	XftGlyphFontSpec specbuf[LINE_SIZE]; /* font spec buffer used for rendering */
 	TCursor c;                           /* cursor */
-	bool dirty;                          /* whether a redraw is needed */
 	int scroll;                          /* current scroll position */
 	int top;                             /* top scroll limit */
 	int bot;                             /* bottom scroll limit */
 	int mode;                            /* terminal mode flags */
 	int esc;                             /* escape state flags */
-	int charset;
 	int lines;
 	int padding;
 } term;
@@ -271,7 +265,7 @@ static void tputc(Rune);
 static void treset(void);
 static void tscroll(int);
 static void tsetattr(int *, int);
-static void tsetchar(Rune, Glyph *, int, int);
+static void tsetchar(Glyph *, int, int);
 static void tsetscroll(int, int);
 static void tswapscreen(void);
 static void tsetmode(int, int *, int);
@@ -953,8 +947,8 @@ size_t ttyread(void)
 		die("Couldn't read from shell: %s\n", strerror(errno));
 
 	// Reset scroll
-	if (term.lines >= term.scroll + term.row)
-		tscroll(term.lines + 1 - term.scroll - term.row);
+	if (term.lines > term.scroll)
+		term.scroll = term.lines;
 
 	// Decode UTF-8
 	for (char *ptr = buf; ptr < buf + buf_len; ++ptr) {
@@ -1022,8 +1016,15 @@ void treset(void)
 
 void tswapscreen(void)
 {
+	static int scroll_save = 0;
 	term.mode ^= MODE_ALTSCREEN;
-	term.scroll += IS_SET(MODE_ALTSCREEN) ? term.row : -term.row;
+	if (IS_SET(MODE_ALTSCREEN)) {
+		scroll_save = term.lines;
+		term.lines += term.row;
+	} else {
+		term.lines = scroll_save;
+	}
+	term.scroll = term.lines;
 }
 
 static void scrolldown(void) { tscroll(term.row - 2); }
@@ -1032,7 +1033,7 @@ static void scrollup(void) { tscroll(2 - term.row); }
 void tscroll(int n)
 {
 	term.scroll += n;
-	LIMIT(term.scroll, 0, term.lines - term.bot);
+	LIMIT(term.scroll, 0, term.lines);
 }
 
 void tnewline(bool first_col)
@@ -1051,17 +1052,16 @@ void tnewline(bool first_col)
 /* for absolute user moves, when decom is set */
 void tmoveato(int x, int y)
 {
-	tmoveto(x, y + ((term.c.state & CURSOR_ORIGIN) ? term.top: 0));
+	tmoveto(x, y + (IS_SET(MODE_ABSMOVE) ? term.top : 0));
 }
 
 void tmoveto(int x, int y)
 {
-	term.c.state &= ~CURSOR_WRAPNEXT;
 	term.c.x = LIMIT(x, 0, term.col - 1);
 	term.c.y = LIMIT(y, 0, term.row - 1);
 }
 
-void tsetchar(Rune u, Glyph *attr, int x, int y)
+void tsetchar(Glyph *glyph, int x, int y)
 {
 	static int vt100_0[] = { /* 0x41 - 0x7e */
 		0x256c, 0x2592, 0, 0, 0, 0, 0xb0, 0xb1,            /* ` - g */
@@ -1070,11 +1070,10 @@ void tsetchar(Rune u, Glyph *attr, int x, int y)
 		0x2502, 0x2264, 0x2265, 0x3c0, 0x2260, 0xa3, 0xb7, /* x - ~ */
 	};
 
-	if (term.charset && BETWEEN(u, '`', '~'))
-		u = vt100_0[u - '`'];
+	if (IS_SET(MODE_ALTCHARSET) && BETWEEN(glyph->u, '`', '~'))
+		glyph->u = vt100_0[glyph->u - '`'];
 
-	TLINE(y)[x] = *attr;
-	TLINE(y)[x].u = u;
+	TLINE(y)[x] = *glyph;
 }
 
 void tclearregion(int x1, int y1, int x2, int y2)
@@ -1270,7 +1269,7 @@ void tsetmode(int set, int *args, int narg)
 			MODBIT(term.mode, set, MODE_APPCURSOR);
 			break;
 		case 6: /* DECOM -- Origin */
-			MODBIT(term.c.state, set, CURSOR_ORIGIN);
+			MODBIT(term.mode, set, MODE_ABSMOVE);
 			tmoveato(0, 0);
 			break;
 		case 7: /* DECAWM -- Auto wrap */
@@ -1540,10 +1539,8 @@ void tcontrolcode(u8 ascii)
 		term.esc = ESC_START;
 		break;
 	case '\016': /* SO (LS1 -- Locking shift 1) */
-		term.charset = 1;
-		break;
 	case '\017': /* SI (LS0 -- Locking shift 0) */
-		term.charset = 0;
+		MODBIT(term.mode, ascii == '\016', MODE_ALTCHARSET);
 		break;
 	case '\030': /* CAN */
 		memset(&csiescseq, 0, sizeof(csiescseq));
@@ -1645,20 +1642,18 @@ void tputc(Rune u)
 	if (sel.mode != SEL_IDLE && BETWEEN(term.c.y, sel.ob.y, sel.oe.y))
 		selclear(NULL);
 
-	if (IS_SET(MODE_WRAP) && (term.c.state & CURSOR_WRAPNEXT)) {
-		TLINE(term.c.y)[term.c.x].mode |= ATTR_WRAP;
-		tnewline(true);
-	}
-
 	if (term.c.x >= term.col)
 		tnewline(true);
 
-	tsetchar(u, &term.c.attr, term.c.x, term.c.y);
+	term.c.attr.u = u;
+	tsetchar(&term.c.attr, term.c.x, term.c.y);
 
-	if (term.c.x + 1 < term.col)
+	if (term.c.x + 1 < term.col) {
 		tmoveto(term.c.x + 1, term.c.y);
-	else
-		term.c.state |= CURSOR_WRAPNEXT;
+	} else {
+		TLINE(term.c.y)[term.c.x].mode |= ATTR_WRAP;
+		tnewline(true);
+	}
 }
 
 u16 sixd_to_16bit(int x)
@@ -2024,9 +2019,8 @@ void drawregion(int x1, int y1, int x2, int y2)
 	XftGlyphFontSpec *specs;
 	int ena_sel = sel.mode != SEL_IDLE && sel.alt == IS_SET(MODE_ALTSCREEN);
 
-	if (!(xw.state & WIN_VISIBLE) || !term.dirty)
+	if (!(xw.state & WIN_VISIBLE))
 		return;
-	term.dirty = false;
 
 	for (y = y1; y < y2; y++) {
 		specs = term.specbuf;
@@ -2136,7 +2130,6 @@ void resize(int width, int height)
 	// Update terminal info
 	term.col = col;
 	term.row = row;
-	term.lines = MAX(term.lines, row - 1);
 	tsetscroll(0, row - 1);
 	tmoveto(term.c.x, term.c.y);
 
@@ -2164,42 +2157,39 @@ void run(void)
 {
 	fd_set rfd;
 	int xfd = XConnectionNumber(xw.dpy);
-	const struct timespec drawtimeout = { 0, 1000000000 / FPS };
+	const struct timespec timeout = { 0, 1000000000 / FPS };
 	struct timespec now, last = { 0, 0 };
-
-	ttynew();
+	bool dirty = true;
 
 	for (;;) {
 		FD_ZERO(&rfd);
 		FD_SET(cmdfd, &rfd);
 		FD_SET(xfd, &rfd);
 
-		if (pselect(MAX(xfd, cmdfd)+1, &rfd, NULL, NULL, &drawtimeout, NULL) < 0) {
-			if (errno == EINTR)
-				continue;
+		int result = pselect(MAX(xfd, cmdfd) + 1, &rfd, NULL, NULL, &timeout, NULL);
+
+		if (result < 0 && errno != EINTR)
 			die("select failed: %s\n", strerror(errno));
-		}
 
-		if (FD_ISSET(cmdfd, &rfd)) {
-			term.dirty = true;
+		dirty |= result > 0;
+
+		if (FD_ISSET(cmdfd, &rfd))
 			ttyread();
-		}
-
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (TIMEDIFF(now, last) < 1000 / FPS)
-			continue;
-		last = now;
 
 		XEvent ev;
 		while (XPending(xw.dpy)) {
-			term.dirty = true;
 			XNextEvent(xw.dpy, &ev);
 			if (handler[ev.type])
 				(handler[ev.type])(&ev);
 		}
 
-		draw();
-		XFlush(xw.dpy);
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (dirty && TIMEDIFF(now, last) > 1000 / FPS) {
+			draw();
+			XFlush(xw.dpy);
+			dirty = false;
+			last = now;
+		}
 	}
 }
 
@@ -2250,5 +2240,6 @@ run:
 	xinit();
 	resize(800, 600);
 	selinit();
+	ttynew();
 	run();
 }
