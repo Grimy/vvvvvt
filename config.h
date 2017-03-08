@@ -1,5 +1,6 @@
 /* See LICENSE file for copyright and license details. */
 
+#define LINE_SIZE 256
 #define histsize 2048
 
 /* see http://freedesktop.org/software/fontconfig/fontconfig-user.html */
