@@ -1,8 +1,5 @@
 /* See LICENSE file for copyright and license details. */
 
-#define LINE_SIZE 256
-#define HIST_SIZE 2048
-
 /* see http://freedesktop.org/software/fontconfig/fontconfig-user.html */
 static char fontname[] = "Hack:antialias=true:autohint=true";
 static char *shell[] = { "/bin/zsh", NULL };
