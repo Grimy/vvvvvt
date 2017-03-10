@@ -1,0 +1,6 @@
+* CSI parsing: *= 10, += digit
+* Fix htop
+* Fix sl
+* Fix vim’s status line
+* Refactor mousereport, tdeletechar, tinstertblank
+* Inline internal shortcuts

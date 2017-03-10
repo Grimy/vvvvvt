@@ -5,11 +5,11 @@ VERSION = 0.7
 
 # includes and libs
 INCS = -I. -I/usr/include -I/usr/X11R6/include \
-       `pkg-config --cflags fontconfig` \
-       `pkg-config --cflags freetype2`
+	`pkg-config --cflags fontconfig` \
+	`pkg-config --cflags freetype2`
 LIBS = -L/usr/lib -lc -L/usr/X11R6/lib -lm -lrt -lX11 -lutil -lXft \
-       `pkg-config --libs fontconfig`  \
-       `pkg-config --libs freetype2`
+	`pkg-config --libs fontconfig`  \
+	`pkg-config --libs freetype2`
 
 # flags
 CC = clang
@@ -18,9 +18,12 @@ CFLAGS += -g -std=c99 -Weverything -Werror -O3 -fno-inline ${INCS} ${CPPFLAGS}
 CFLAGS += -Wno-sign-conversion -Wno-switch -Wno-gnu-case-range
 LDFLAGS += -g ${LIBS}
 
-st: st.c config.h Makefile
+st: st.c colors.c Makefile
 	@echo CC $@
 	@$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
+
+colors.c: husl.pl
+	./$^ > $@
 
 .PHONY: report
 report: st
