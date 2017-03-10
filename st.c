@@ -29,14 +29,10 @@
 #include "arg.h"
 
 // Arbitrary sizes
-#define ESC_BUF_SIZ   128
-#define ESC_ARG_SIZ   16
+#define ESC_BUF_SIZE  128
+#define ESC_ARG_SIZE  16
 #define LINE_SIZE     256
 #define HIST_SIZE     2048
-
-#define XK_ANY_MOD    UINT_MAX
-#define XK_NO_MOD     0
-#define XK_SWITCH_MOD (1 << 13)
 
 // macros
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
@@ -51,6 +47,8 @@
 #define TIMEDIFF(t1, t2)	((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define MODBIT(x, set, bit)	((set) ? ((x) |= (bit)) : ((x) &= ~(bit)))
 #define SWAP(a, b)		do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
+#define TLINE(y)		(term.hist[term.alt ? HIST_SIZE + ((y) + term.scroll) % 64 : ((y) + term.scroll) % HIST_SIZE])
+#define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define ERRESC(...)		die("erresc: " __VA_ARGS__)
 
 enum glyph_attribute {
@@ -72,29 +70,28 @@ enum cursor_movement {
 
 enum term_mode {
 	MODE_WRAP        = 1 << 0,
-	MODE_ALTSCREEN   = 1 << 1,
-	MODE_MOUSEBTN    = 1 << 2,
-	MODE_MOUSEMOTION = 1 << 3,
-	MODE_HIDE        = 1 << 4,
-	MODE_APPCURSOR   = 1 << 5,
-	MODE_MOUSESGR    = 1 << 6,
-	MODE_FOCUS       = 1 << 7,
-	MODE_MOUSEX10    = 1 << 8,
-	MODE_MOUSEMANY   = 1 << 9,
-	MODE_BRCKTPASTE  = 1 << 10,
-	MODE_ABSMOVE     = 1 << 11,
-	MODE_ALTCHARSET  = 1 << 12,
+	MODE_MOUSEBTN    = 1 << 1,
+	MODE_MOUSEMOTION = 1 << 2,
+	MODE_HIDE        = 1 << 3,
+	MODE_APPCURSOR   = 1 << 4,
+	MODE_MOUSESGR    = 1 << 5,
+	MODE_FOCUS       = 1 << 6,
+	MODE_MOUSEX10    = 1 << 7,
+	MODE_MOUSEMANY   = 1 << 8,
+	MODE_BRCKTPASTE  = 1 << 9,
+	MODE_ABSMOVE     = 1 << 10,
+	MODE_ALTCHARSET  = 1 << 11,
 	MODE_MOUSE       = MODE_MOUSEBTN | MODE_MOUSEMOTION
 	                 | MODE_MOUSEX10 | MODE_MOUSEMANY,
 };
 
-enum escape_state {
+typedef enum {
 	ESC_NONE,
 	ESC_START,
 	ESC_CSI,
 	ESC_STR,
 	ESC_CHARSET,
-};
+} escape_state;
 
 enum selection_snap {
 	SNAP_WORD = 1,
@@ -128,7 +125,7 @@ typedef struct {
 
 // ESC '[' [[ [<priv>] <arg> [;]] <mode> [<mode>]]
 static struct {
-	char buf[ESC_BUF_SIZ]; /* raw string */
+	char buf[ESC_BUF_SIZE]; /* raw string */
 	u32 len;               /* raw string length */
 } csiescseq;
 
@@ -167,8 +164,8 @@ typedef struct {
 
 static struct {
 	bool active;
+	bool alt;
 	int snap;
-	int alt;
 	int padding;
 	/*
 	 * Selection variables:
@@ -178,9 +175,6 @@ static struct {
 	 * oe – original coordinates of the end of the selection
 	 */
 	Point nb, ne, ob, oe;
-
-	char *primary, *clipboard;
-	Atom xtarget;
 } sel;
 
 typedef struct {
@@ -202,18 +196,19 @@ static void scrollup(void);
 
 /* Internal representation of the screen */
 static struct {
-	int row;                             /* row count */
-	int col;                             /* column count */
-	Glyph hist[HIST_SIZE][LINE_SIZE];    /* history buffer */
-	Glyph alt[64][LINE_SIZE];            /* alternate buffer */
-	XftGlyphFontSpec specbuf[LINE_SIZE]; /* font spec buffer used for rendering */
-	TCursor c;                           /* cursor */
-	int scroll;                          /* current scroll position */
-	int top;                             /* top scroll limit */
-	int bot;                             /* bottom scroll limit */
-	int mode;                            /* terminal mode flags */
-	int esc;                             /* escape state flags */
+	int row;                               /* row count */
+	int col;                               /* column count */
+	Glyph hist[HIST_SIZE + 64][LINE_SIZE]; /* history buffer */
+	XftGlyphFontSpec specbuf[LINE_SIZE];   /* font spec buffer used for rendering */
+	TCursor c;                             /* cursor */
+	int scroll;                            /* current scroll position */
+	int top;                               /* top scroll limit */
+	int bot;                               /* bottom scroll limit */
+	int mode;                              /* terminal mode flags */
+	escape_state esc;                      /* escape state flags */
 	int lines;
+	bool alt;
+	int padding;
 } term;
 
 /* Drawing Context */
@@ -235,22 +230,6 @@ static u8 utfbyte[UTF_SIZE + 1] = {0x80,    0, 0xC0, 0xE0, 0xF0};
 static u8 utfmask[UTF_SIZE + 1] = {0xC0, 0x80, 0xE0, 0xF0, 0xF8};
 static Rune utfmin[UTF_SIZE + 1] = {       0,    0,  0x80,  0x800,  0x10000};
 static Rune utfmax[UTF_SIZE + 1] = {0x10FFFF, 0x7F, 0x7FF, 0xFFFF, 0x10FFFF};
-
-static Glyph* TLINE(int y) {
-	if (IS_SET(MODE_ALTSCREEN))
-		return term.alt[(y + term.scroll) % LEN(term.alt)];
-	else
-		return term.hist[(y + term.scroll) % LEN(term.hist)];
-}
-
-static void __attribute__((noreturn)) die(const char *errstr, ...)
-{
-	va_list ap;
-	va_start(ap, errstr);
-	vfprintf(stderr, errstr, ap);
-	va_end(ap);
-	exit(1);
-}
 
 static char utf8encodebyte(Rune u, size_t i)
 {
@@ -330,9 +309,9 @@ static void selnormalize(void)
 	selsnap(&sel.ne.x, sel.ne.y - term.scroll, +1);
 
 	// Expand selection over line breaks
-	sel.nb.x = MIN(sel.nb.x, tlinelen(sel.nb.y));
-	if (tlinelen(sel.ne.y) <= sel.ne.x)
-		sel.ne.x = term.col - 1;
+	// sel.nb.x = MIN(sel.nb.x, tlinelen(sel.nb.y));
+	// if (tlinelen(sel.ne.y) <= sel.ne.x)
+		// sel.ne.x = term.col - 1;
 }
 
 static bool selected(int x, int y)
@@ -403,11 +382,11 @@ static void xloadfont(XftFont **f, FcPattern *pattern)
 
 	match = XftFontMatch(xw.dpy, xw.scr, pattern, &result);
 	if (!match)
-		die("st: can't open font %s\n", pattern);
+		die("st: can't open font\n");
 
 	if (!(*f = XftFontOpenPattern(xw.dpy, match))) {
 		FcPatternDestroy(match);
-		die("st: can't open font %s\n", pattern);
+		die("st: can't open font\n");
 	}
 
 	XftTextExtentsUtf8(xw.dpy, *f, (const FcChar8 *) "Q", 1, &extents);
@@ -478,11 +457,6 @@ static void xinit(void)
 	// Colors
 	xw.cmap = XDefaultColormap(xw.dpy, xw.scr);
 	xloadcolors();
-
-	// Selection
-	sel.xtarget = XInternAtom(xw.dpy, "UTF8_STRING", 0);
-	if (sel.xtarget == None)
-		sel.xtarget = XA_STRING;
 
 	// Adjust fixed window geometry
 	xw.w = 2 * borderpx + term.col * xw.cw;
@@ -697,7 +671,7 @@ static void drawregion(int x1, int y1, int x2, int y2)
 	int i, x, y, ox, numspecs;
 	Glyph base, new;
 	XftGlyphFontSpec *specs;
-	bool draw_sel = sel.active && sel.alt == IS_SET(MODE_ALTSCREEN);
+	bool draw_sel = sel.active && sel.alt == term.alt;
 
 	if (!xw.visible)
 		return;
@@ -788,14 +762,14 @@ static void tscroll(int n)
 		tclearregion(0, term.c.y, term.col - 1, term.c.y);
 }
 
-static char *getsel(void)
+static void getsel(FILE* pipe)
 {
 	char *str, *ptr;
 	int y, bufsize, lastx, linelen;
 	Glyph *gp, *last;
 
 	if (!sel.active)
-		return NULL;
+		return;
 
 	bufsize = (term.col+1) * (sel.ne.y-sel.nb.y+1) * UTF_SIZE;
 	ptr = str = malloc(bufsize);
@@ -818,56 +792,31 @@ static char *getsel(void)
 		for ( ; gp <= last; ++gp)
 			ptr += utf8encode(gp->u, ptr);
 
-		/*
-		 * Copy and pasting of line endings is inconsistent
-		 * in the inconsistent terminal and GUI world.
-		 * The best solution seems like to produce '\n' when
-		 * something is copied from st and convert '\n' to
-		 * '\r', when something to be pasted is received by
-		 * st.
-		 * FIXME: Fix the computer world.
-		 */
 		if ((y < sel.ne.y || lastx >= linelen) && !(last->mode & ATTR_WRAP))
 			*ptr++ = '\n';
 	}
 	*ptr = 0;
-	return str;
+
+	if (!fwrite(str, 1, strlen(str), pipe))
+		die("error copying sel: %s", strerror(errno));
 }
 
-static void selpaste()
+static void xsel(char* opts, bool copy)
 {
-	XConvertSelection(xw.dpy, XA_PRIMARY, sel.xtarget, XA_PRIMARY, xw.win, CurrentTime);
+	FILE* pipe = popen(opts, copy ? "w" : "r");
+	char sel_buf[512];
+
+	if (copy)
+		getsel(pipe);
+	else
+		ttywrite(sel_buf, fread(sel_buf, 1, 512, pipe));
+	fclose(pipe);
 }
 
-static void clipcopy()
-{
-	Atom clipboard;
-
-	if (sel.clipboard != NULL)
-		free(sel.clipboard);
-
-	if (sel.primary != NULL) {
-		sel.clipboard = strdup(sel.primary);
-		clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
-		XSetSelectionOwner(xw.dpy, clipboard, xw.win, CurrentTime);
-	}
-}
-
-static void clippaste()
-{
-	Atom clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
-	XConvertSelection(xw.dpy, clipboard, sel.xtarget, clipboard, xw.win, CurrentTime);
-}
-
-static void xsetsel(char *str, Time t)
-{
-	free(sel.primary);
-	sel.primary = str;
-
-	XSetSelectionOwner(xw.dpy, XA_PRIMARY, xw.win, t);
-	if (XGetSelectionOwner(xw.dpy, XA_PRIMARY) != xw.win)
-		sel.active = false;
-}
+static void selcopy()   { xsel("xsel -pi", true); }
+static void clipcopy()  { xsel("xsel -bi", true); }
+static void selpaste()  { xsel("xsel -po", false);  }
+static void clippaste() { xsel("xsel -bo", false); }
 
 static void mousereport(XButtonEvent *e)
 {
@@ -935,23 +884,12 @@ static void mousereport(XButtonEvent *e)
 	ttywrite(buf, len);
 }
 
-static int match(u32 mask, u32 state)
-{
-	return mask == XK_ANY_MOD || mask == (state & ~ignoremod);
-}
-
 static char* kmap(KeySym k, u32 state)
 {
-	for (Key *kp = key; kp < key + LEN(key); kp++) {
-		if (kp->k != k)
-			continue;
-		if (!match(kp->mask, state))
-			continue;
-		if (IS_SET(MODE_APPCURSOR) ? kp->appcursor < 0 : kp->appcursor > 0)
-			continue;
-		return kp->s;
-	}
-
+	for (Key *kp = key; kp < key + LEN(key); kp++)
+		if (kp->k == k && !(kp->mask & ~state)
+			&& (IS_SET(MODE_APPCURSOR) ? kp->appcursor >= 0 : kp->appcursor <= 0))
+			return kp->s;
 	return "";
 }
 
@@ -997,12 +935,11 @@ static void tputtab(int n)
 static void tcursor(int mode)
 {
 	static TCursor c[2];
-	int alt = IS_SET(MODE_ALTSCREEN);
 
 	if (mode == CURSOR_SAVE)
-		c[alt] = term.c;
+		c[term.alt] = term.c;
 	else if (mode == CURSOR_LOAD)
-		term.c = c[alt];
+		term.c = c[term.alt];
 }
 
 static void tmoveto(int x, int y)
@@ -1021,7 +958,7 @@ static void tswapscreen(void)
 {
 	static int scroll_save = 0;
 
-	term.mode ^= MODE_ALTSCREEN;
+	term.alt = !term.alt;
 	SWAP(scroll_save, term.lines);
 	term.scroll = term.lines;
 }
@@ -1111,7 +1048,7 @@ static void kpress(XEvent *e)
 	KeySym ksym = XKeycodeToKeysym(xw.dpy, (char) ev->keycode, 1);
 
 	for (Shortcut *bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
-		if (bp->keysym == ksym && match(bp->mod, ev->state)) {
+		if (bp->keysym == ksym && !(bp->mod & ~ev->state)) {
 			bp->func();
 			return;
 		}
@@ -1177,7 +1114,7 @@ static void bpress(XEvent *e)
 	switch (ev->button) {
 	case Button1:
 		sel.active = sel.oe.x == point.x && sel.oe.y == point.y;
-		sel.alt = IS_SET(MODE_ALTSCREEN);
+		sel.alt = term.alt;
 		sel.snap = sel.active ? MIN(sel.snap + 1, SNAP_LINE) : 0;
 		sel.ob = sel.oe = point;
 		selnormalize();
@@ -1206,7 +1143,7 @@ static void brelease(XEvent *e)
 	else if (ev->button == Button2)
 		selpaste();
 	else if (sel.active && (ev->button == Button1 || ev->button == Button3))
-		xsetsel(getsel(), ev->time);
+		selcopy();
 }
 
 static void selclear(__attribute__((unused)) XEvent *e)
@@ -1214,179 +1151,13 @@ static void selclear(__attribute__((unused)) XEvent *e)
 	sel.active = false;
 }
 
-static void selnotify(XEvent *e)
-{
-	u64 nitems, ofs, rem;
-	int format;
-	u8 *data, *last, *repl;
-	Atom type, incratom, property;
-
-	incratom = XInternAtom(xw.dpy, "INCR", 0);
-
-	ofs = 0;
-	if (e->type == SelectionNotify)
-		property = e->xselection.property;
-	else if (e->type == PropertyNotify)
-		property = e->xproperty.atom;
-	else
-		return;
-
-	if (property == None)
-		return;
-
-	do {
-		if (XGetWindowProperty(xw.dpy, xw.win, property, ofs,
-				BUFSIZ / 4, False, AnyPropertyType,
-				&type, &format, &nitems, &rem, &data))
-			die("Clipboard allocation failed\n");
-
-		if (e->type == PropertyNotify && nitems == 0 && rem == 0) {
-			/*
-			 * If there is some PropertyNotify with no data, then
-			 * this is the signal of the selection owner that all
-			 * data has been transferred. We won't need to receive
-			 * PropertyNotify events anymore.
-			 */
-			MODBIT(xw.attrs.event_mask, 0, PropertyChangeMask);
-			XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask,
-					&xw.attrs);
-		}
-
-		if (type == incratom) {
-			/*
-			 * Activate the PropertyNotify events so we receive
-			 * when the selection owner does send us the next
-			 * chunk of data.
-			 */
-			MODBIT(xw.attrs.event_mask, 1, PropertyChangeMask);
-			XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &xw.attrs);
-
-			/*
-			 * Deleting the property is the transfer start signal.
-			 */
-			XDeleteProperty(xw.dpy, xw.win, (int)property);
-			continue;
-		}
-
-		/*
-		 * As seen in getsel:
-		 * Line endings are inconsistent in the terminal and GUI world
-		 * copy and pasting. When receiving some selection data,
-		 * replace all '\n' with '\r'.
-		 * FIXME: Fix the computer world.
-		 */
-		repl = data;
-		last = data + nitems * format / 8;
-		while ((repl = memchr(repl, '\n', last - repl))) {
-			*repl++ = '\r';
-		}
-
-		if (IS_SET(MODE_BRCKTPASTE) && ofs == 0)
-			ttywrite("\033[200~", 6);
-		ttywrite((char *)data, nitems * format / 8);
-		if (IS_SET(MODE_BRCKTPASTE) && rem == 0)
-			ttywrite("\033[201~", 6);
-		XFree(data);
-		/* number of 32-bit chunks returned */
-		ofs += nitems * format / 32;
-	} while (rem > 0);
-
-	/*
-	 * Deleting the property again tells the selection owner to send the
-	 * next data chunk in the property.
-	 */
-	XDeleteProperty(xw.dpy, xw.win, (int)property);
-}
-
-
-static void propnotify(XEvent *e)
-{
-	XPropertyEvent *xpev;
-	Atom clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
-
-	xpev = &e->xproperty;
-	if (xpev->state == PropertyNewValue &&
-			(xpev->atom == XA_PRIMARY ||
-			 xpev->atom == clipboard)) {
-		selnotify(e);
-	}
-}
-
-static void selrequest(XEvent *e)
-{
-	XSelectionRequestEvent *xsre;
-	XSelectionEvent xev;
-	Atom xa_targets, string, clipboard;
-	char *seltext;
-
-	xsre = (XSelectionRequestEvent *) e;
-	xev.type = SelectionNotify;
-	xev.requestor = xsre->requestor;
-	xev.selection = xsre->selection;
-	xev.target = xsre->target;
-	xev.time = xsre->time;
-	if (xsre->property == None)
-		xsre->property = xsre->target;
-
-	/* reject */
-	xev.property = None;
-
-	xa_targets = XInternAtom(xw.dpy, "TARGETS", 0);
-	if (xsre->target == xa_targets) {
-		/* respond with the supported type */
-		string = sel.xtarget;
-		XChangeProperty(xsre->display, xsre->requestor, xsre->property,
-				XA_ATOM, 32, PropModeReplace,
-				(u8 *) &string, 1);
-		xev.property = xsre->property;
-	} else if (xsre->target == sel.xtarget || xsre->target == XA_STRING) {
-		/*
-		 * xith XA_STRING non ascii characters may be incorrect in the
-		 * requestor. It is not our problem, use utf8.
-		 */
-		clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
-		if (xsre->selection == XA_PRIMARY) {
-			seltext = sel.primary;
-		} else if (xsre->selection == clipboard) {
-			seltext = sel.clipboard;
-		} else {
-			fprintf(stderr,
-				"Unhandled clipboard selection 0x%lx\n",
-				xsre->selection);
-			return;
-		}
-		if (seltext != NULL) {
-			XChangeProperty(xsre->display, xsre->requestor,
-					xsre->property, xsre->target,
-					8, PropModeReplace,
-					(u8 *) seltext, (int) strlen(seltext));
-			xev.property = xsre->property;
-		}
-	}
-
-	/* all done, send a notification to the listener */
-	if (!XSendEvent(xsre->display, xsre->requestor, 1, 0, (XEvent *) &xev))
-		fprintf(stderr, "Error sending SelectionNotify event\n");
-}
-
-static void __attribute__((noreturn)) sigchld(int stat)
-{
-	if (wait(&stat) < 0)
-		die("waiting for child failed: %s\n", strerror(errno));
-
-	if (!WIFEXITED(stat) || WEXITSTATUS(stat))
-		die("child finished with error '%d'\n", stat);
-
-	exit(0);
-}
-
 static void ttynew(void)
 {
-	int s;
+	int slave;
 	struct winsize w = { (unsigned short) term.row, (unsigned short) term.col, 0, 0 };
 
 	// seems to work fine on linux, openbsd and freebsd
-	if (openpty(&ttyfd, &s, NULL, NULL, &w) < 0)
+	if (openpty(&ttyfd, &slave, NULL, NULL, &w) < 0)
 		die("openpty failed: %s\n", strerror(errno));
 
 	switch (fork()) {
@@ -1395,18 +1166,18 @@ static void ttynew(void)
 	case 0:
 		close(1);
 		setsid(); // create a new process group
-		dup2(s, 0);
-		dup2(s, 1);
-		dup2(s, 2);
-		if (ioctl(s, TIOCSCTTY, NULL) < 0)
+		dup2(slave, 0);
+		dup2(slave, 1);
+		dup2(slave, 2);
+		if (ioctl(slave, TIOCSCTTY, NULL) < 0)
 			die("ioctl TIOCSCTTY failed: %s\n", strerror(errno));
-		close(s);
+		close(slave);
 		close(ttyfd);
 		execvp(opt_cmd[0], opt_cmd);
 		die("exec failed: %s\n", strerror(errno));
 	default:
-		close(s);
-		signal(SIGCHLD, sigchld);
+		close(slave);
+		signal(SIGCHLD, SIG_IGN);
 	}
 }
 
@@ -1519,7 +1290,7 @@ static void tsetmode(bool set, int arg)
 	case 1048:
 	case 1049: // Swap screen & set/restore cursor
 		tcursor(CURSOR_SAVE);
-		if (set ^ IS_SET(MODE_ALTSCREEN))
+		if (set ^ term.alt)
 			tswapscreen();
 		if (set)
 			tclearregion(0, 0, term.col - 1, term.row -1);
@@ -1560,7 +1331,7 @@ static void csihandle(void)
 	int len;
 	char *p = csiescseq.buf;
 
-	int arg[ESC_ARG_SIZ];
+	int arg[ESC_ARG_SIZE];
 	int narg = 0;
 
 	if (*p == '?')
@@ -1568,7 +1339,7 @@ static void csihandle(void)
 
 	while (p < csiescseq.buf + csiescseq.len) {
 		arg[narg++] = (int) strtol(p, &p, 10);
-		if (*p != ';' || narg == ESC_ARG_SIZ)
+		if (*p != ';' || narg == ESC_ARG_SIZE)
 			break;
 		++p;
 	}
@@ -1709,7 +1480,7 @@ static void csihandle(void)
 	}
 }
 
-static enum escape_state eschandle(u8 ascii)
+static escape_state eschandle(u8 ascii)
 {
 	switch (ascii) {
 	case '[':
@@ -1848,8 +1619,8 @@ static size_t ttyread(void)
 	static char buf[BUFSIZ];
 	static Rune rune = 0;
 	static int utf_len = 0;
-	ssize_t buf_len = read(ttyfd, buf, BUFSIZ);
 
+	ssize_t buf_len = read(ttyfd, buf, BUFSIZ);
 	if (buf_len < 0)
 		die("Couldn't read from shell: %s\n", strerror(errno));
 
@@ -1900,7 +1671,7 @@ static void __attribute__((noreturn)) run(void)
 
 		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
 
-		if (result < 0 && errno != EINTR)
+		if (result < 0)
 			die("select failed: %s\n", strerror(errno));
 
 		dirty |= result > 0;
@@ -1917,7 +1688,6 @@ static void __attribute__((noreturn)) run(void)
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		if (dirty && TIMEDIFF(now, last) > 1000 / FPS) {
-			// printf("[%s] %ld.%ld\n", FD_ISSET(ttyfd, &read_fds) ? "TTY" : "XEV", now.tv_sec, now.tv_nsec);
 			draw();
 			XFlush(xw.dpy);
 			dirty = false;
@@ -1937,10 +1707,6 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[ButtonPress] = bpress,
 	[ButtonRelease] = brelease,
 	[SelectionClear] = selclear,
-	[SelectionNotify] = selnotify,
-	// PropertyNotify is only turned on during selection retrieval
-	[PropertyNotify] = propnotify,
-	[SelectionRequest] = selrequest,
 };
 
 int main(int argc, char *argv[])

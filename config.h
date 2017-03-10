@@ -16,7 +16,7 @@ static int ch_add = 0;
 static char worddelimiters[] = " <>'`\"(){}";
 
 /* frames per second st should at maximum draw to the screen */
-#define FPS 30
+#define FPS 60
 
 /* Bell volume. It must be a value between -100 and 100. */
 static int bellvolume = 12;
@@ -63,12 +63,6 @@ static Shortcut shortcuts[] = {
 };
 
 /*
- * State bits to ignore when matching key or button events.  By default,
- * numlock (Mod2Mask) and keyboard layout (XK_SWITCH_MOD) are ignored.
- */
-static u32 ignoremod = Mod2Mask|XK_SWITCH_MOD;
-
-/*
  * Override mouse-select while mask is active (when MODE_MOUSE is set).
  * Note that if you want to use ShiftMask with selmasks, set this to an other
  * modifier, set to 0 to not use it.
@@ -81,33 +75,33 @@ static u32 forceselmod = ShiftMask;
  */
 static Key key[] = {
 	/* keysym           mask          app  string */
-	{ XK_Up,            ControlMask,   0,  "\033[1;5A" },
-	{ XK_Up,            XK_ANY_MOD,   -1,  "\033[A"    },
-	{ XK_Up,            XK_ANY_MOD,   +1,  "\033OA"    },
-	{ XK_Down,          ControlMask,   0,  "\033[1;5B" },
-	{ XK_Down,          XK_ANY_MOD,   -1,  "\033[B"    },
-	{ XK_Down,          XK_ANY_MOD,   +1,  "\033OB"    },
-	{ XK_Right,         ControlMask,   0,  "\033[1;5C" },
-	{ XK_Right,         XK_ANY_MOD,   -1,  "\033[C"    },
-	{ XK_Right,         XK_ANY_MOD,   +1,  "\033OC"    },
-	{ XK_Left,          ControlMask,   0,  "\033[1;5D" },
-	{ XK_Left,          XK_ANY_MOD,   -1,  "\033[D"    },
-	{ XK_Left,          XK_ANY_MOD,   +1,  "\033OD"    },
-	{ XK_Escape,        XK_ANY_MOD,    0,  "\033"      },
-	{ XK_ISO_Left_Tab,  ShiftMask,     0,  "\033[Z"    },
-	{ XK_ISO_Left_Tab,  XK_ANY_MOD,    0,  "\t"        },
-	{ XK_Return,        XK_ANY_MOD,    0,  "\r"        },
-	{ XK_KP_Enter,      XK_ANY_MOD,    0,  "\r"        },
-	{ XK_BackSpace,     XK_NO_MOD,     0,  "\x7F"      },
-	{ XK_BackSpace,     ControlMask,   0,  "\027"      },
-	{ XK_Home,          XK_ANY_MOD,   -1,  "\033[H"    },
-	{ XK_Home,          XK_ANY_MOD,   +1,  "\033[1~"   },
-	{ XK_Insert,        XK_ANY_MOD,    0,  "\033[2~"   },
-	{ XK_Delete,        ControlMask,   0,  "\033[3;5~" },
-	{ XK_Delete,        ShiftMask,     0,  "\033[3;2~" },
-	{ XK_Delete,        XK_ANY_MOD,    0,  "\033[3~"   },
-	{ XK_End,           XK_ANY_MOD,   -1,  "\033[F"    },
-	{ XK_End,           XK_ANY_MOD,   +1,  "\033[4~"   },
-	{ XK_Prior,         XK_ANY_MOD,    0,  "\033[5~"   },
-	{ XK_Next,          XK_ANY_MOD,    0,  "\033[6~"   },
+	{ XK_Up,            ControlMask,    0,  "\033[1;5A" },
+	{ XK_Up,            0,             -1,  "\033[A"    },
+	{ XK_Up,            0,             +1,  "\033OA"    },
+	{ XK_Down,          ControlMask,    0,  "\033[1;5B" },
+	{ XK_Down,          0,             -1,  "\033[B"    },
+	{ XK_Down,          0,             +1,  "\033OB"    },
+	{ XK_Right,         ControlMask,    0,  "\033[1;5C" },
+	{ XK_Right,         0,             -1,  "\033[C"    },
+	{ XK_Right,         0,             +1,  "\033OC"    },
+	{ XK_Left,          ControlMask,    0,  "\033[1;5D" },
+	{ XK_Left,          0,             -1,  "\033[D"    },
+	{ XK_Left,          0,             +1,  "\033OD"    },
+	{ XK_Escape,        0,              0,  "\033"      },
+	{ XK_ISO_Left_Tab,  ShiftMask,      0,  "\033[Z"    },
+	{ XK_ISO_Left_Tab,  0,              0,  "\t"        },
+	{ XK_Return,        0,              0,  "\r"        },
+	{ XK_KP_Enter,      0,              0,  "\r"        },
+	{ XK_BackSpace,     0,              0,  "\x7F"      },
+	{ XK_BackSpace,     ControlMask,    0,  "\027"      },
+	{ XK_Home,          0,             -1,  "\033[H"    },
+	{ XK_Home,          0,             +1,  "\033[1~"   },
+	{ XK_Insert,        0,              0,  "\033[2~"   },
+	{ XK_Delete,        ControlMask,    0,  "\033[3;5~" },
+	{ XK_Delete,        ShiftMask,      0,  "\033[3;2~" },
+	{ XK_Delete,        0,              0,  "\033[3~"   },
+	{ XK_End,           0,             -1,  "\033[F"    },
+	{ XK_End,           0,             +1,  "\033[4~"   },
+	{ XK_Prior,         0,              0,  "\033[5~"   },
+	{ XK_Next,          0,              0,  "\033[6~"   },
 };
