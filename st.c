@@ -137,9 +137,9 @@ typedef struct {
 
 // ESC '[' [[ [<priv>] <arg> [;]] <mode> [<mode>]]
 static struct {
-	char buf[128];   /* raw string */
-	u32 len;         /* raw string length */
-} csiescseq;
+	int arg[16];
+	u32 nargs;
+} csi;
 
 // Graphical info
 static struct {
@@ -910,19 +910,14 @@ static void tnewline(bool first_col)
 		term.c.x = 0;
 }
 
-static void treset(void)
+static void treset(bool hard_reset)
 {
-	term.c = (TCursor) {{
-		.fg = defaultfg,
-		.bg = defaultbg
-	}, .x = 0, .y = 0 };
-
+	term.c = (TCursor) {{ .fg = defaultfg, .bg = defaultbg }, .x = 0, .y = 0 };
 	tsetscroll(0, term.row - 1);
 	term.alt = term.hide = term.focus = term.charset = term.bracket_paste = false;
 	term.wrap = true;
-	sel.ne.y = -1;
 
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < (hard_reset ? 2 : 0); i++) {
 		tmoveto(0, 0);
 		tswapscreen();
 		tclearregion(0, 0, term.col - 1, term.row - 1);
@@ -1220,31 +1215,17 @@ static void tsetmode(bool set, int arg)
 	}
 }
 
-static void csihandle(void)
+static void csihandle(char command, int *arg, u32 nargs)
 {
-	char *p = csiescseq.buf;
-	int arg[16];
-	int narg = 0;
-
 	term.esc = ESC_NONE;
-
-	if (*p == '?')
-		p++;
-
-	while (p < csiescseq.buf + csiescseq.len) {
-		arg[narg++] = (int) strtol(p, &p, 10);
-		if (*p != ';' || narg == LEN(arg))
-			break;
-		++p;
-	}
 
 	// Argument default values
 	if (arg[0] == 0)
-		arg[0] = !strchr("JKcm", *p);
+		arg[0] = !strchr("JKcm", command);
 	if (arg[1] == 0)
 		arg[1] = 1;
 
-	switch (*p) {
+	switch (command) {
 	case '@': // ICH -- Insert <n> blank char
 		tinsertblank(arg[0]);
 		break;
@@ -1340,8 +1321,8 @@ static void csihandle(void)
 		break;
 	case 'h': // SM -- Set terminal mode
 	case 'l': // RM -- Reset Mode
-		for (int i = 0; i < narg; ++i)
-			tsetmode(*p == 'h', arg[i]);
+		for (u32 i = 0; i < nargs; ++i)
+			tsetmode(command == 'h', arg[i]);
 		break;
 	case 'm': // SGR -- Terminal attribute
 		if (arg[0] == 38 && arg[1] == 5)
@@ -1349,7 +1330,7 @@ static void csihandle(void)
 		else if (arg[0] == 48 && arg[1] == 5)
 			term.c.attr.bg = (u8) (arg[2]);
 		else
-			for (int i = 0; i < narg; i++)
+			for (u32 i = 0; i < nargs; i++)
 				tsetattr(arg[i]);
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
@@ -1359,10 +1340,11 @@ static void csihandle(void)
 		int len = snprintf(buf, sizeof(buf),"\033[%i;%iR", term.c.y + 1, term.c.x + 1);
 		ttywrite(buf, len);
 		break;
-	case '!': // DECSTR -- TODO
+	case 'p': // DECSTR -- Soft terminal reset
+		treset(false);
 		break;
-	case ' ': // DECSCUSR -- Set Cursor Style
-		if (p[1] != 'q' || !BETWEEN(arg[0], 0, 6))
+	case 'q': // DECSCUSR -- Set Cursor Style
+		if (!BETWEEN(arg[0], 0, 6))
 			goto unknown;
 		xw.cursor = arg[0];
 		break;
@@ -1372,11 +1354,11 @@ static void csihandle(void)
 		break;
 	case 's': // DECSC -- Save cursor position
 	case 'u': // DECRC -- Restore cursor position
-		tcursor(*p == 'u' ? CURSOR_LOAD : CURSOR_SAVE);
+		tcursor(command == 'u' ? CURSOR_LOAD : CURSOR_SAVE);
 		break;
 	default:
 	unknown:
-		ERRESC("unknown CSI %.*s\n", csiescseq.len, csiescseq.buf);
+		ERRESC("unknown CSI %c\n", command);
 	}
 }
 
@@ -1384,7 +1366,7 @@ static escape_state eschandle(u8 ascii)
 {
 	switch (ascii) {
 	case '[':
-		csiescseq.len = 0;
+		memset(&csi, 0, sizeof(csi));
 		return ESC_CSI;
 	case 'P': // DCS -- Device Control String
 	case '_': // APC -- Application Program Command
@@ -1417,7 +1399,7 @@ static escape_state eschandle(u8 ascii)
 		ttywrite(vtiden, sizeof(vtiden) - 1);
 		return ESC_NONE;
 	case 'c': // RIS -- Reset to inital state
-		treset();
+		treset(true);
 		return ESC_NONE;
 	case '7': // DECSC -- Save Cursor
 	case '8': // DECRC -- Restore Cursor
@@ -1480,9 +1462,12 @@ static void tputc(Rune u)
 		term.esc = eschandle((char) u);
 		return;
 	case ESC_CSI:
-		csiescseq.buf[csiescseq.len++] = (char) u;
-		if (BETWEEN(u, 0x40, 0x7E) || csiescseq.len >= LEN(csiescseq.buf))
-			csihandle();
+		if (BETWEEN(u, '0', '9'))
+			csi.arg[csi.nargs] = 10 * csi.arg[csi.nargs] + u - '0';
+		else if (BETWEEN(u, '@', '~'))
+			csihandle((char) u, csi.arg, ++csi.nargs);
+		else if (u == ';' && csi.nargs < LEN(csi.arg) - 1)
+			++csi.nargs;
 		return;
 	case ESC_STR:
 		return;
@@ -1508,11 +1493,25 @@ static void tputc(Rune u)
 	}
 }
 
+static void utf8decode(u8 c) {
+	static Rune rune = 0;
+	static int utf_len = 0;
+
+	if (c < 0x80) {
+		tputc(c);
+	} else if (c < 0xC0) {
+		rune = (rune << 6) | (c & 0x3F);
+		if (--utf_len <= 0)
+			tputc(rune);
+	} else {
+		utf_len = (c >> 4) & 3;
+		rune = c & (0x3F >> utf_len);
+	}
+}
+
 static size_t ttyread(void)
 {
 	static char buf[BUFSIZ];
-	static Rune rune = 0;
-	static int utf_len = 0;
 
 	ssize_t buf_len = read(ttyfd, buf, BUFSIZ);
 	if (buf_len < 0)
@@ -1522,26 +1521,8 @@ static size_t ttyread(void)
 	if (!term.alt)
 		term.scroll = term.lines;
 
-	// Decode UTF-8
-	for (char *ptr = buf; ptr < buf + buf_len; ++ptr) {
-		if (*ptr >= 0) {
-			tputc(*ptr);
-		} else if (*ptr >= -16) {
-			rune = *ptr & 7;
-			utf_len = 3;
-		} else if (*ptr >= -32) {
-			rune = *ptr & 15;
-			utf_len = 2;
-		} else if (*ptr >= -64) {
-			rune = *ptr & 31;
-			utf_len = 1;
-		} else {
-			rune <<= 6;
-			rune |= *ptr & 63;
-			if (!--utf_len)
-				tputc(rune);
-		}
-	}
+	for (char *ptr = buf; ptr < buf + buf_len; ++ptr)
+		utf8decode(*ptr);
 
 	return buf_len;
 }
@@ -1609,7 +1590,7 @@ int main(int argc, char *argv[])
 		opt_cmd = argv + 1;
 
 	setlocale(LC_CTYPE, "");
-	treset();
+	treset(true);
 	xinit();
 	resize(800, 600);
 	ttynew();
