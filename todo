@@ -1,6 +1,7 @@
-* CSI parsing: *= 10, += digit
 * Fix htop
 * Fix sl
 * Fix vim’s status line
 * Refactor mousereport, tdeletechar, tinstertblank
+* Understand xmakefontglyphspecs
+* Merge {i,}{b,}font into an array
 * Inline internal shortcuts

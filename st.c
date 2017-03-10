@@ -63,6 +63,7 @@ typedef enum {
 	ATTR_INVISIBLE  = 1 << 5,
 	ATTR_STRUCK     = 1 << 6,
 	ATTR_WRAP       = 1 << 7,
+	ATTR_BAR        = 1 << 8,
 	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
 } glyph_attribute;
 
@@ -274,12 +275,6 @@ static bool selected(int x, int y)
 		&& (y != sel.ne.y || x <= sel.ne.x);
 }
 
-// Absolute coordinates.
-static void xclear(int x1, int y1, int x2, int y2)
-{
-	XftDrawRect(xw.draw, &dc.col[defaultbg], x1, y1, x2 - x1, y2 - y1);
-}
-
 static void xhints(void)
 {
 	XClassHint class = { "st", "st" };
@@ -462,97 +457,39 @@ static int xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int
 static void xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, int y)
 {
 	int winx = borderpx + x * xw.cw, winy = borderpx + y * xw.ch, width = len * xw.cw;
-	Color *fg, *bg, *temp;
-	XRenderColor colfg;
-	XRectangle r;
+	Color *fg, *bg;
+	XRectangle r = { 0, 0, (u16) width, (u16) xw.ch };
 
 	fg = &dc.col[base.fg];
 	bg = &dc.col[base.bg];
 
-	if (base.mode & ATTR_REVERSE) {
-		temp = fg;
-		fg = bg;
-		bg = temp;
-	}
-
-	if ((base.mode & ATTR_BOLD_FAINT) == ATTR_FAINT) {
-		colfg.red = fg->color.red / 2;
-		colfg.green = fg->color.green / 2;
-		colfg.blue = fg->color.blue / 2;
-	}
+	if (base.mode & ATTR_REVERSE)
+		SWAP(fg, bg);
 
 	if (base.mode & ATTR_INVISIBLE)
 		fg = bg;
 
-	/* Clean up the region we want to draw to. */
+	// Render the background
 	XftDrawRect(xw.draw, bg, winx, winy, width, xw.ch);
 
-	/* Set the clip region because Xft is sometimes dirty. */
-	r.x = 0;
-	r.y = 0;
-	r.height = (u16) xw.ch;
-	r.width = (u16) width;
+	// Set the clip region because Xft is sometimes dirty
 	XftDrawSetClipRectangles(xw.draw, winx, winy, &r, 1);
 
-	/* Render the glyphs. */
+	// Render the glyphs
 	XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
 
-	/* Render underline and strikethrough. */
+	// Render bars
 	if (base.mode & ATTR_UNDERLINE)
 		XftDrawRect(xw.draw, fg, winx, winy + dc.font->ascent + 1, width, 1);
 
 	if (base.mode & ATTR_STRUCK)
 		XftDrawRect(xw.draw, fg, winx, winy + 2 * dc.font->ascent / 3, width, 1);
 
-	/* Reset clip to none. */
+	if (base.mode & ATTR_BAR)
+		XftDrawRect(xw.draw, fg, winx + 2, winy, 2, xw.ch);
+
+	// Reset clip to none
 	XftDrawSetClip(xw.draw, 0);
-}
-
-static void xdrawglyph(Glyph g, int x, int y)
-{
-	int numspecs;
-	XftGlyphFontSpec spec;
-
-	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
-	xdrawglyphfontspecs(&spec, g, numspecs, x, y);
-}
-
-static void xdrawcursor(void)
-{
-	static int oldx = 0, oldy = 0;
-	int curx = term.c.x;
-	Glyph g = {.u = TLINE(term.c.y)[term.c.x].u, 0, defaultbg, defaultfg};
-
-	LIMIT(oldx, 0, term.col - 1);
-	LIMIT(oldy, 0, term.row - 1);
-
-	// Remove the old cursor
-	xdrawglyph(TLINE(oldy)[oldx], oldx, oldy);
-
-	if (term.hide || term.scroll != term.lines)
-		return;
-
-	// Draw the new one
-	switch (xw.focused ? xw.cursor : 4) {
-	case 0: // Blinking Block
-	case 1: // Blinking Block (Default)
-	case 2: // Steady Block
-		xdrawglyph(g, term.c.x, term.c.y);
-		break;
-	case 3: // Blinking Underline
-	case 4: // Steady Underline
-		XftDrawRect(xw.draw, &dc.col[defaultfg], borderpx + curx * xw.cw,
-			borderpx + (term.c.y + 1) * xw.ch - 2, xw.cw, 2);
-		break;
-	case 5: // Blinking bar
-	case 6: // Steady bar
-		XftDrawRect(xw.draw, &dc.col[defaultfg], borderpx + curx * xw.cw,
-			borderpx + term.c.y * xw.ch, 2, xw.ch);
-		break;
-	}
-
-	oldx = curx;
-	oldy = term.c.y;
 }
 
 static void drawregion(int x1, int y1, int x2, int y2)
@@ -561,9 +498,14 @@ static void drawregion(int x1, int y1, int x2, int y2)
 	Glyph base, new;
 	XftGlyphFontSpec *specs;
 	bool draw_sel = sel.alt == term.alt;
+	int cursor = term.hide || term.scroll != term.lines ? 0 :
+		xw.focused && xw.cursor < 3 ? ATTR_REVERSE :
+		xw.cursor < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 
 	if (!xw.visible)
 		return;
+
+	XftDrawRect(xw.draw, &dc.col[defaultbg], 0, 0, xw.w, xw.h);
 
 	for (y = y1; y < y2; y++) {
 		specs = term.specbuf;
@@ -575,6 +517,8 @@ static void drawregion(int x1, int y1, int x2, int y2)
 			new = TLINE(y)[x];
 			if (draw_sel && selected(x, y + term.scroll))
 				new.mode ^= ATTR_REVERSE;
+			if (x == term.c.x && y == term.c.y)
+				new.mode ^= cursor;
 			if (i > 0 && ATTRCMP(base, new)) {
 				xdrawglyphfontspecs(specs, base, i, ox, y);
 				specs += i;
@@ -590,7 +534,6 @@ static void drawregion(int x1, int y1, int x2, int y2)
 		if (i > 0)
 			xdrawglyphfontspecs(specs, base, i, ox, y);
 	}
-	xdrawcursor();
 }
 
 static void draw(void)
@@ -941,7 +884,7 @@ static void resize(int width, int height)
 	XFreePixmap(xw.dpy, xw.buf);
 	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, xw.scr));
 	XftDrawChange(xw.draw, xw.buf);
-	xclear(0, 0, xw.w, xw.h);
+	XftDrawRect(xw.draw, &dc.col[defaultbg], 0, 0, xw.w, xw.h);
 
 	// Send our size to the tty driver so that applications can query it
 	struct winsize w = { (u16) term.row, (u16) term.col, 0, 0 };
