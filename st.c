@@ -27,6 +27,7 @@
 #include "colors.c"
 
 // Config
+#define FONT_SIZE 11
 #define LINE_SIZE 256
 #define HIST_SIZE 2048
 #define FPS 60
@@ -34,7 +35,7 @@
 #define defaultbg 0
 #define bellvolume 12
 #define vtiden "\033[?6c"
-#define borderpx 2
+#define borderpx 5
 #define fontname "Hack:antialias=true:autohint=true"
 #define shell "/bin/zsh"
 
@@ -145,22 +146,18 @@ static struct {
 // Graphical info
 static struct {
 	Display *dpy;
-	Colormap cmap;
 	Window win;
 	Drawable buf;
-	Atom xembed, wmdeletewin, netwmname, netwmpid;
+	Atom wmdeletewin;
 	XftDraw *draw;
 	Visual *vis;
 	XSetWindowAttributes attrs;
 	int scr;
-	int l, t;   /* left and top offset */
-	int gm;     /* geometry mask */
-	int w, h;   /* window width and height */
-	int ch, cw; /* character width and height */
+	int w, h;     // window width and height
+	int ch, cw;   // character width and height
 	bool visible;
 	bool focused;
-	int cursor; /* cursor style */
-	int padding;
+	int cursor;   // cursor style
 } xw;
 
 static struct {
@@ -275,13 +272,6 @@ static bool selected(int x, int y)
 		&& (y != sel.ne.y || x <= sel.ne.x);
 }
 
-static void xhints(void)
-{
-	XClassHint class = { "st", "st" };
-	XWMHints wm = { .flags = InputHint, .input = 1 };
-	XSetWMProperties(xw.dpy, xw.win, NULL, NULL, NULL, 0, NULL, &wm, &class);
-}
-
 static void xloadfont(XftFont **f, FcPattern *pattern)
 {
 	FcPattern *match;
@@ -316,7 +306,7 @@ static void xloadfonts(char *fontstr)
 	if (!pattern)
 		die("st: can't open font %s\n", fontstr);
 
-	FcPatternAddDouble(pattern, FC_SIZE, 12);
+	FcPatternAddDouble(pattern, FC_SIZE, FONT_SIZE);
 	xloadfont(&dc.font, pattern);
 
 	FcPatternDel(pattern, FC_SLANT);
@@ -336,77 +326,50 @@ static void xloadfonts(char *fontstr)
 
 static void xinit(void)
 {
-	XGCValues gcvalues;
-	Window parent = 0;
-	pid_t thispid = getpid();
-
 	if (!(xw.dpy = XOpenDisplay(NULL)))
 		die("Can't open display\n");
 	xw.scr = XDefaultScreen(xw.dpy);
 	xw.vis = XDefaultVisual(xw.dpy, xw.scr);
 
-	// Font
+	// Fonts
 	if (!FcInit())
 		die("Could not init fontconfig.\n");
-
 	xloadfonts(fontname);
 
 	// Colors
-	xw.cmap = XDefaultColormap(xw.dpy, xw.scr);
+	Colormap cmap = XDefaultColormap(xw.dpy, xw.scr);
 	for (u32 i = 0; i < LEN(dc.col); i++)
-		if (!XftColorAllocName(xw.dpy, xw.vis, xw.cmap, colors[i], &dc.col[i]))
+		if (!XftColorAllocName(xw.dpy, xw.vis, cmap, colors[i], &dc.col[i]))
 			die("Could not allocate color %d\n", i);
 
-	// Adjust fixed window geometry
-	xw.w = 2 * borderpx + term.col * xw.cw;
-	xw.h = 2 * borderpx + term.row * xw.ch;
-	if (xw.gm & XNegative)
-		xw.l += DisplayWidth(xw.dpy, xw.scr) - xw.w - 2;
-	if (xw.gm & YNegative)
-		xw.t += DisplayHeight(xw.dpy, xw.scr) - xw.h - 2;
+	// Set geometry to some arbitrary values while we wait for the resize event
+	xw.w = 2 * borderpx;
+	xw.h = 2 * borderpx;
 
 	// Events
 	xw.attrs.background_pixel = dc.col[defaultbg].pixel;
-	xw.attrs.border_pixel = dc.col[defaultbg].pixel;
-	xw.attrs.bit_gravity = NorthWestGravity;
 	xw.attrs.event_mask = FocusChangeMask | KeyPressMask
 		| VisibilityChangeMask | StructureNotifyMask
 		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
-	xw.attrs.colormap = xw.cmap;
+	xw.attrs.colormap = cmap;
 
-	parent = XRootWindow(xw.dpy, xw.scr);
-	xw.win = XCreateWindow(xw.dpy, parent, xw.l, xw.t, xw.w, xw.h, 0,
+	Window parent = XRootWindow(xw.dpy, xw.scr);
+	xw.win = XCreateWindow(xw.dpy, parent, 0, 0, xw.w, xw.h, 0,
 			XDefaultDepth(xw.dpy, xw.scr), InputOutput, xw.vis,
 			CWBackPixel | CWBorderPixel | CWBitGravity | CWEventMask | CWColormap,
 			&xw.attrs);
 
-	memset(&gcvalues, 0, sizeof(gcvalues));
-	gcvalues.graphics_exposures = False;
-	dc.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures,
-			&gcvalues);
-	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h,
-			DefaultDepth(xw.dpy, xw.scr));
-	XSetForeground(xw.dpy, dc.gc, dc.col[defaultbg].pixel);
-	XFillRectangle(xw.dpy, xw.buf, dc.gc, 0, 0, xw.w, xw.h);
-
-	// Xft rendering context
-	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.cmap);
+	// Graphic context
+	XGCValues gcvalues = { .graphics_exposures = False };
+	dc.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures, &gcvalues);
+	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, xw.scr));
+	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.attrs.colormap);
 	XDefineCursor(xw.dpy, xw.win, XCreateFontCursor(xw.dpy, XC_xterm));
-
-	xw.xembed = XInternAtom(xw.dpy, "_XEMBED", False);
-	xw.wmdeletewin = XInternAtom(xw.dpy, "WM_DELETE_WINDOW", False);
-	xw.netwmname = XInternAtom(xw.dpy, "_NET_WM_NAME", False);
-	XSetWMProtocols(xw.dpy, xw.win, &xw.wmdeletewin, 1);
-
-	xw.netwmpid = XInternAtom(xw.dpy, "_NET_WM_PID", False);
-	XChangeProperty(xw.dpy, xw.win, xw.netwmpid, XA_CARDINAL, 32,
-			PropModeReplace, (u8 *)&thispid, 1);
 
 	// Various
 	XSetLocaleModifiers("");
 	XMapWindow(xw.dpy, xw.win);
-	xhints();
-	XSync(xw.dpy, False);
+	XStoreName(xw.dpy, xw.win, "st");
 }
 
 static int xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x, int y)
@@ -561,10 +524,10 @@ static void tclearregion(int x1, int y1, int x2, int y2)
 	if (y1 > y2)
 		SWAP(y1, y2);
 
-	LIMIT(x1, 0, term.col-1);
-	LIMIT(x2, 0, term.col-1);
-	LIMIT(y1, 0, term.row-1);
-	LIMIT(y2, 0, term.row-1);
+	LIMIT(x1, 0, term.col - 1);
+	LIMIT(x2, 0, term.col - 1);
+	LIMIT(y1, 0, term.row - 1);
+	LIMIT(y2, 0, term.row - 1);
 
 	if (sel.nb.y <= y2 && sel.ne.y >= y1)
 		sel.ne.y = -1;
@@ -628,7 +591,6 @@ static void getsel(FILE* pipe)
 {
 	char *str, *ptr;
 	int y, bufsize, lastx, linelen;
-	Glyph *gp, *last;
 
 	bufsize = (term.col + 1) * (sel.ne.y - sel.nb.y + 1) * 4;
 	ptr = str = malloc(bufsize);
@@ -641,21 +603,19 @@ static void getsel(FILE* pipe)
 
 		Glyph *line = term.hist[y % HIST_SIZE];
 
-		gp = &line[sel.nb.y == y ? sel.nb.x : 0];
 		lastx = (sel.ne.y == y) ? sel.ne.x : term.col-1;
-		last = &line[MIN(lastx, linelen - 1)];
+		Glyph *last = &line[MIN(lastx, linelen - 1)];
 		while (last->u == ' ')
 			--last;
 
-		for ( ; gp <= last; ++gp)
+		for (Glyph *gp = &line[sel.nb.y == y ? sel.nb.x : 0]; gp <= last; ++gp)
 			ptr = utf8encode(gp->u, ptr);
 
 		if ((y < sel.ne.y || lastx >= linelen) && !(last->mode & ATTR_WRAP))
 			*ptr++ = '\n';
 	}
-	*ptr = 0;
 
-	if (!fwrite(str, 1, strlen(str), pipe))
+	if (!fwrite(str, 1, ptr - str, pipe))
 		die("error copying sel: %s", strerror(errno));
 }
 
@@ -1518,7 +1478,6 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[KeyPress] = kpress,
 	[ConfigureNotify] = configure_notify,
 	[VisibilityNotify] = visibility,
-	[UnmapNotify] = visibility,
 	[FocusIn] = focus,
 	[FocusOut] = focus,
 	[MotionNotify] = bmotion,
@@ -1535,7 +1494,6 @@ int main(int argc, char *argv[])
 	setlocale(LC_CTYPE, "");
 	treset(true);
 	xinit();
-	resize(800, 600);
 	ttynew();
 	run();
 }

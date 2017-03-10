@@ -5,3 +5,4 @@
 * Understand xmakefontglyphspecs
 * Merge {i,}{b,}font into an array
 * Inline internal shortcuts
+* Use '\0' instead of ' '
