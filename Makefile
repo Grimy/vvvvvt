@@ -15,7 +15,7 @@ LIBS = -L/usr/lib -lc -L/usr/X11R6/lib -lm -lrt -lX11 -lutil -lXft \
 CC = clang
 CPPFLAGS = -DVERSION=\"${VERSION}\" -D_XOPEN_SOURCE=600
 CFLAGS += -g -std=c99 -Weverything -Werror -O3 -fno-inline ${INCS} ${CPPFLAGS}
-CFLAGS += -Wno-sign-conversion -Wno-switch -Wno-deprecated-declarations -Wno-gnu-case-range
+CFLAGS += -Wno-sign-conversion -Wno-switch -Wno-gnu-case-range
 LDFLAGS += -g ${LIBS}
 
 st: st.c config.h Makefile

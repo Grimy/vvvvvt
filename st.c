@@ -15,18 +15,14 @@
 #include <locale.h>
 #include <pty.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-
-#include "arg.h"
 
 // Arbitrary sizes
 #define ESC_BUF_SIZE  128
@@ -43,15 +39,14 @@
 #define ISDELIM(u)		(strchr(worddelimiters, u) != NULL)
 #define LIMIT(x, a, b)		((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define ATTRCMP(a, b)		((a).mode != (b).mode || (a).fg != (b).fg || (a).bg != (b).bg)
-#define IS_SET(flag)		((term.mode & (flag)) != 0)
 #define TIMEDIFF(t1, t2)	((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
-#define MODBIT(x, set, bit)	((set) ? ((x) |= (bit)) : ((x) &= ~(bit)))
 #define SWAP(a, b)		do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define TLINE(y)		(term.hist[term.alt ? HIST_SIZE + ((y) + term.scroll) % 64 : ((y) + term.scroll) % HIST_SIZE])
+#define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define ERRESC(...)		die("erresc: " __VA_ARGS__)
 
-enum glyph_attribute {
+typedef enum {
 	ATTR_BOLD       = 1 << 0,
 	ATTR_FAINT      = 1 << 1,
 	ATTR_ITALIC     = 1 << 2,
@@ -61,29 +56,21 @@ enum glyph_attribute {
 	ATTR_STRUCK     = 1 << 6,
 	ATTR_WRAP       = 1 << 7,
 	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
-};
+} glyph_attribute;
 
-enum cursor_movement {
+typedef enum {
 	CURSOR_SAVE,
 	CURSOR_LOAD
-};
+} cursor_movement;
 
-enum term_mode {
-	MODE_WRAP        = 1 << 0,
-	MODE_MOUSEBTN    = 1 << 1,
-	MODE_MOUSEMOTION = 1 << 2,
-	MODE_HIDE        = 1 << 3,
-	MODE_APPCURSOR   = 1 << 4,
-	MODE_MOUSESGR    = 1 << 5,
-	MODE_FOCUS       = 1 << 6,
-	MODE_MOUSEX10    = 1 << 7,
-	MODE_MOUSEMANY   = 1 << 8,
-	MODE_BRCKTPASTE  = 1 << 9,
-	MODE_ABSMOVE     = 1 << 10,
-	MODE_ALTCHARSET  = 1 << 11,
-	MODE_MOUSE       = MODE_MOUSEBTN | MODE_MOUSEMOTION
-	                 | MODE_MOUSEX10 | MODE_MOUSEMANY,
-};
+typedef enum {
+	MOUSE_NONE,
+	MOUSE_X10 = 9,
+	MOUSE_BTN = 1000,
+	MOUSE_MOTION = 1002,
+	MOUSE_MANY = 1003,
+	MOUSE_SGR = 1006,
+} mouse_mode;
 
 typedef enum {
 	ESC_NONE,
@@ -93,10 +80,10 @@ typedef enum {
 	ESC_CHARSET,
 } escape_state;
 
-enum selection_snap {
+typedef enum {
 	SNAP_WORD = 1,
 	SNAP_LINE = 2
-};
+} selection_snap;
 
 typedef enum { false, true } bool;
 typedef uint8_t u8;
@@ -107,7 +94,6 @@ typedef uint64_t u64;
 typedef uint32_t Rune;
 #define Glyph Glyph_
 
-typedef XftDraw *Draw;
 typedef XftColor Color;
 
 typedef struct {
@@ -136,7 +122,7 @@ static struct {
 	Window win;
 	Drawable buf;
 	Atom xembed, wmdeletewin, netwmname, netwmpid;
-	Draw draw;
+	XftDraw *draw;
 	Visual *vis;
 	XSetWindowAttributes attrs;
 	int scr;
@@ -163,18 +149,12 @@ typedef struct {
 } Point;
 
 static struct {
-	bool active;
 	bool alt;
 	int snap;
-	int padding;
-	/*
-	 * Selection variables:
-	 * nb – normalized coordinates of the beginning of the selection
-	 * ne – normalized coordinates of the end of the selection
-	 * ob – original coordinates of the beginning of the selection
-	 * oe – original coordinates of the end of the selection
-	 */
-	Point nb, ne, ob, oe;
+	Point ob; // original coordinates of the beginning of the selection
+	Point oe; // original coordinates of the end of the selection
+	Point nb; // normalized coordinates of the beginning of the selection
+	Point ne; // normalized coordinates of the end of the selection
 } sel;
 
 typedef struct {
@@ -191,27 +171,25 @@ static void selpaste(void);
 static void scrolldown(void);
 static void scrollup(void);
 
-/* Config.h for applying patches and the configuration. */
 #include "config.h"
 
-/* Internal representation of the screen */
+// Terminal state
 static struct {
-	int row;                               /* row count */
-	int col;                               /* column count */
-	Glyph hist[HIST_SIZE + 64][LINE_SIZE]; /* history buffer */
-	XftGlyphFontSpec specbuf[LINE_SIZE];   /* font spec buffer used for rendering */
-	TCursor c;                             /* cursor */
-	int scroll;                            /* current scroll position */
-	int top;                               /* top scroll limit */
-	int bot;                               /* bottom scroll limit */
-	int mode;                              /* terminal mode flags */
-	escape_state esc;                      /* escape state flags */
+	int row;                               // row count
+	int col;                               // column count
+	Glyph hist[HIST_SIZE + 64][LINE_SIZE]; // history buffer
+	XftGlyphFontSpec specbuf[LINE_SIZE];   // font spec buffer used for rendering
+	TCursor c;                             // cursor
+	int scroll;                            // current scroll position
+	int top;                               // top scroll limit
+	int bot;                               // bottom scroll limit
+	mouse_mode mouse;                      // terminal mode flags
+	escape_state esc;                      // escape state flags
 	int lines;
-	bool alt;
-	int padding;
+	bool alt, hide, focus, appcursor, absmove, charset, wrap, bracket_paste;
 } term;
 
-/* Drawing Context */
+// Drawing Context
 static struct {
 	Color col[256];
 	XftFont *font, *bfont, *ifont, *ibfont;
@@ -223,46 +201,6 @@ static char **opt_cmd  = shell;
 static char *opt_title = "st";
 static void (*handler[LASTEvent])(XEvent *);
 
-// Crappy UTF-8 constants
-#define UTF_SIZE 4
-#define UTF_INVALID   0xFFFD
-static u8 utfbyte[UTF_SIZE + 1] = {0x80,    0, 0xC0, 0xE0, 0xF0};
-static u8 utfmask[UTF_SIZE + 1] = {0xC0, 0x80, 0xE0, 0xF0, 0xF8};
-static Rune utfmin[UTF_SIZE + 1] = {       0,    0,  0x80,  0x800,  0x10000};
-static Rune utfmax[UTF_SIZE + 1] = {0x10FFFF, 0x7F, 0x7FF, 0xFFFF, 0x10FFFF};
-
-static char utf8encodebyte(Rune u, size_t i)
-{
-	return utfbyte[i] | (u & ~utfmask[i]);
-}
-
-static size_t utf8validate(Rune *u, size_t i)
-{
-	if (!BETWEEN(*u, utfmin[i], utfmax[i]) || BETWEEN(*u, 0xD800, 0xDFFF))
-		*u = UTF_INVALID;
-	for (i = 1; *u > utfmax[i]; ++i)
-		;
-
-	return i;
-}
-
-static size_t utf8encode(Rune u, char *c)
-{
-	size_t len, i;
-
-	len = utf8validate(&u, 0);
-	if (len > UTF_SIZE)
-		return 0;
-
-	for (i = len - 1; i != 0; --i) {
-		c[i] = utf8encodebyte(u, 0);
-		u >>= 6;
-	}
-	c[0] = utf8encodebyte(u, len);
-
-	return len;
-}
-
 static Point ev2point(XButtonEvent *e)
 {
 	int x = (e->x - borderpx) / xw.cw;
@@ -272,52 +210,29 @@ static Point ev2point(XButtonEvent *e)
 	return (Point) { x, y + term.scroll };
 }
 
-static int tlinelen(int y)
-{
-	int i = term.col;
-
-	if (TLINE(y)[i - 1].mode & ATTR_WRAP)
-		return i;
-
-	while (i > 0 && TLINE(y)[i - 1].u == ' ')
-		--i;
-
-	return i;
-}
-
 static void selsnap(int *x, int y, int direction)
 {
-	switch (sel.snap) {
-		case SNAP_WORD:
-			while (BETWEEN(*x, 0, term.col - 1) && !ISDELIM(TLINE(y)[*x].u))
-				*x += direction;
-			*x -= direction;
-			break;
-		case SNAP_LINE:
-			*x = (direction < 0) ? 0 : term.col - 1;
-			break;
+	if (sel.snap == SNAP_WORD) {
+		while (BETWEEN(*x, 0, term.col - 1) && !ISDELIM(TLINE(y)[*x].u))
+			*x += direction;
+		*x -= direction;
+	} else if (sel.snap == SNAP_LINE) {
+		*x = (direction < 0) ? 0 : term.col - 1;
 	}
 }
 
 static void selnormalize(void)
 {
-	bool swapped = sel.ob.y > sel.oe.y || (sel.ob.y == sel.oe.y && sel.ob.x > sel.oe.x);
+	bool swapped = AFTER(sel.ob, sel.oe);
 	sel.nb = swapped ? sel.oe : sel.ob;
 	sel.ne = swapped ? sel.ob : sel.oe;
-
 	selsnap(&sel.nb.x, sel.nb.y - term.scroll, -1);
 	selsnap(&sel.ne.x, sel.ne.y - term.scroll, +1);
-
-	// Expand selection over line breaks
-	// sel.nb.x = MIN(sel.nb.x, tlinelen(sel.nb.y));
-	// if (tlinelen(sel.ne.y) <= sel.ne.x)
-		// sel.ne.x = term.col - 1;
 }
 
 static bool selected(int x, int y)
 {
-	return sel.active
-		&& BETWEEN(y, sel.nb.y, sel.ne.y)
+	return BETWEEN(y, sel.nb.y, sel.ne.y)
 		&& (y != sel.nb.y || x >= sel.nb.x)
 		&& (y != sel.ne.y || x <= sel.ne.x);
 }
@@ -334,11 +249,12 @@ static int xloadcolor(int i, Color *ncolor)
 
 	XRenderColor color = { .alpha = 0xffff };
 
-	if (i < 6*6*6+16) { /* same colors as xterm */
+	// same colors as xterm
+	if (i < 6*6*6+16) {
 		color.red   = sixd_to_16bit((i - 16) / 36 % 6);
 		color.green = sixd_to_16bit((i - 16) /  6 % 6);
 		color.blue  = sixd_to_16bit((i - 16) /  1 % 6);
-	} else { /* greyscale */
+	} else {
 		color.red = (u16) (0x0808 + 0x0a0a * (i - (6*6*6+16)));
 		color.green = color.blue = color.red;
 	}
@@ -640,7 +556,7 @@ static void xdrawcursor(void)
 	/* remove the old cursor */
 	xdrawglyph(TLINE(oldy)[oldx], oldx, oldy);
 
-	if (IS_SET(MODE_HIDE) || (!IS_SET(MODE_APPCURSOR) && term.scroll != term.lines))
+	if (term.hide || (!term.appcursor && term.scroll != term.lines))
 		return;
 
 	/* draw the new one */
@@ -671,7 +587,7 @@ static void drawregion(int x1, int y1, int x2, int y2)
 	int i, x, y, ox, numspecs;
 	Glyph base, new;
 	XftGlyphFontSpec *specs;
-	bool draw_sel = sel.active && sel.alt == term.alt;
+	bool draw_sel = sel.alt == term.alt;
 
 	if (!xw.visible)
 		return;
@@ -722,12 +638,6 @@ static void ttywrite(const char *buf, size_t n)
 	}
 }
 
-static void xsetpointermotion(bool set)
-{
-	MODBIT(xw.attrs.event_mask, set, PointerMotionMask);
-	XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &xw.attrs);
-}
-
 static void tclearregion(int x1, int y1, int x2, int y2)
 {
 	if (x1 > x2)
@@ -740,8 +650,8 @@ static void tclearregion(int x1, int y1, int x2, int y2)
 	LIMIT(y1, 0, term.row-1);
 	LIMIT(y2, 0, term.row-1);
 
-	if (sel.nb.y < y2 && sel.ne.y > y1)
-		sel.active = false;
+	if (sel.nb.y <= y2 && sel.ne.y >= y1)
+		sel.ne.y = -1;
 
 	for (int y = y1; y <= y2; y++) {
 		for (int x = x1; x <= x2; x++) {
@@ -758,23 +668,55 @@ static void tscroll(int n)
 {
 	term.scroll += n;
 	LIMIT(term.scroll, 0, term.lines);
-	if (IS_SET(MODE_APPCURSOR))
+	if (term.appcursor)
 		tclearregion(0, term.c.y, term.col - 1, term.c.y);
 }
 
+static int tlinelen(int y)
+{
+	int i = term.col;
+
+	if (TLINE(y)[i - 1].mode & ATTR_WRAP)
+		return i;
+
+	while (i > 0 && TLINE(y)[i - 1].u == ' ')
+		--i;
+
+	return i;
+}
+
+static char* utf8encode(Rune u, char *p)
+{
+	if (u < 0x80) {
+		*p++ = (char) u;
+		return p;
+	}
+
+	if (u < 0x800) {
+		*p++ = (char) (0xC0 | u >> 6);
+	} else if (u < 0x10000) {
+		*p++ = (char) (0xE0 | u >> 12);
+		*p++ = (char) (0x80 | ((u >> 6) & 0x3F));
+	} else {
+		*p++ = (char) (0xF0 | u >> 18);
+		*p++ = (char) (0x80 | ((u >> 12) & 0x3F));
+		*p++ = (char) (0x80 | ((u >>  6) & 0x3F));
+	}
+
+	*p++ = (char) (0x80 | (u & 0x3F));
+	return p;
+}
+
+// append every set & selected glyph to the selection
 static void getsel(FILE* pipe)
 {
 	char *str, *ptr;
 	int y, bufsize, lastx, linelen;
 	Glyph *gp, *last;
 
-	if (!sel.active)
-		return;
-
-	bufsize = (term.col+1) * (sel.ne.y-sel.nb.y+1) * UTF_SIZE;
+	bufsize = (term.col + 1) * (sel.ne.y - sel.nb.y + 1) * 4;
 	ptr = str = malloc(bufsize);
 
-	/* append every set & selected glyph to the selection */
 	for (y = sel.nb.y; y <= sel.ne.y; y++) {
 		if ((linelen = tlinelen(y)) == 0) {
 			*ptr++ = '\n';
@@ -785,12 +727,12 @@ static void getsel(FILE* pipe)
 
 		gp = &line[sel.nb.y == y ? sel.nb.x : 0];
 		lastx = (sel.ne.y == y) ? sel.ne.x : term.col-1;
-		last = &line[MIN(lastx, linelen-1)];
-		while (last >= gp && last->u == ' ')
+		last = &line[MIN(lastx, linelen - 1)];
+		while (last->u == ' ')
 			--last;
 
 		for ( ; gp <= last; ++gp)
-			ptr += utf8encode(gp->u, ptr);
+			ptr = utf8encode(gp->u, ptr);
 
 		if ((y < sel.ne.y || lastx >= linelen) && !(last->mode & ATTR_WRAP))
 			*ptr++ = '\n';
@@ -803,6 +745,9 @@ static void getsel(FILE* pipe)
 
 static void xsel(char* opts, bool copy)
 {
+	if (copy && !AFTER(sel.ne, sel.nb))
+		return;
+
 	FILE* pipe = popen(opts, copy ? "w" : "r");
 	char sel_buf[512];
 
@@ -833,17 +778,17 @@ static void mousereport(XButtonEvent *e)
 	if (e->type == MotionNotify) {
 		if (x == ox && y == oy)
 			return;
-		if (!IS_SET(MODE_MOUSEMOTION) && !IS_SET(MODE_MOUSEMANY))
+		if (term.mouse != MOUSE_MOTION && term.mouse != MOUSE_MANY)
 			return;
 		/* MOUSE_MOTION: no reporting if no button is pressed */
-		if (IS_SET(MODE_MOUSEMOTION) && oldbutton == 3)
+		if (term.mouse == MOUSE_MOTION && oldbutton == 3)
 			return;
 
 		button = oldbutton + 32;
 		ox = x;
 		oy = y;
 	} else {
-		if (!IS_SET(MODE_MOUSESGR) && e->type == ButtonRelease) {
+		if (term.mouse != MOUSE_SGR && e->type == ButtonRelease) {
 			button = 3;
 		} else {
 			button -= Button1;
@@ -856,21 +801,19 @@ static void mousereport(XButtonEvent *e)
 			oy = y;
 		} else if (e->type == ButtonRelease) {
 			oldbutton = 3;
-			/* MODE_MOUSEX10: no button release reporting */
-			if (IS_SET(MODE_MOUSEX10))
-				return;
-			if (button == 64 || button == 65)
+			/* MOUSE_X10: no button release reporting */
+			if (term.mouse == MOUSE_X10 || button == 64 || button == 65)
 				return;
 		}
 	}
 
-	if (!IS_SET(MODE_MOUSEX10)) {
+	if (term.mouse != MOUSE_X10) {
 		button += ((state & ShiftMask  ) ? 4  : 0)
 			+ ((state & Mod4Mask   ) ? 8  : 0)
 			+ ((state & ControlMask) ? 16 : 0);
 	}
 
-	if (IS_SET(MODE_MOUSESGR)) {
+	if (term.mouse == MOUSE_SGR) {
 		len = snprintf(buf, sizeof(buf), "\033[<%d;%d;%d%c",
 				button, x + 1, y + 1,
 				e->type == ButtonRelease ? 'm' : 'M');
@@ -887,8 +830,7 @@ static void mousereport(XButtonEvent *e)
 static char* kmap(KeySym k, u32 state)
 {
 	for (Key *kp = key; kp < key + LEN(key); kp++)
-		if (kp->k == k && !(kp->mask & ~state)
-			&& (IS_SET(MODE_APPCURSOR) ? kp->appcursor >= 0 : kp->appcursor <= 0))
+		if (kp->k == k && !(kp->mask & ~state) && !(term.appcursor && kp->appcursor))
 			return kp->s;
 	return "";
 }
@@ -951,7 +893,7 @@ static void tmoveto(int x, int y)
 /* for absolute user moves, when decom is set */
 static void tmoveato(int x, int y)
 {
-	tmoveto(x, y + (IS_SET(MODE_ABSMOVE) ? term.top : 0));
+	tmoveto(x, y + (term.absmove ? term.top : 0));
 }
 
 static void tswapscreen(void)
@@ -980,7 +922,7 @@ static void tsetchar(Glyph *glyph, int x, int y)
 		0x2502, 0x2264, 0x2265, 0x3c0, 0x2260, 0xa3, 0xb7, /* x - ~ */
 	};
 
-	if (IS_SET(MODE_ALTCHARSET) && BETWEEN(glyph->u, '`', '~'))
+	if (term.charset && BETWEEN(glyph->u, '`', '~'))
 		glyph->u = vt100_0[glyph->u - '`'];
 
 	TLINE(y)[x] = *glyph;
@@ -1007,7 +949,8 @@ static void treset(void)
 	}, .x = 0, .y = 0 };
 
 	tsetscroll(0, term.row - 1);
-	term.mode = MODE_WRAP;
+	term.wrap = true;
+	sel.ne.y = -1;
 
 	for (int i = 0; i < 2; i++) {
 		tmoveto(0, 0);
@@ -1045,7 +988,9 @@ static void resize(int width, int height)
 static void kpress(XEvent *e)
 {
 	XKeyEvent *ev = &e->xkey;
-	KeySym ksym = XKeycodeToKeysym(xw.dpy, (char) ev->keycode, 1);
+	char buf[8];
+	KeySym ksym;
+	int len = XLookupString(ev, buf, LEN(buf) - 1, &ksym, NULL);
 
 	for (Shortcut *bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
 		if (bp->keysym == ksym && !(bp->mod & ~ev->state)) {
@@ -1054,13 +999,11 @@ static void kpress(XEvent *e)
 		}
 	}
 
-	if ((ksym & 0xFFE0) >= 0xFD00 && (ksym & 0xFFE0) != 0xFFA0) {
+	if (len && *buf != '\b' && *buf != '\x7F') {
+		ttywrite(buf, len);
+	} else {
 		char *customkey = kmap(ksym, ev->state);
 		ttywrite(customkey, strlen(customkey));
-	} else {
-		char buf[UTF_SIZE + 1];
-		int len = XLookupString(ev, buf, UTF_SIZE, NULL, NULL);
-		ttywrite(buf, len);
 	}
 }
 
@@ -1086,7 +1029,8 @@ static void focus(XEvent *ev)
 		return;
 
 	xw.focused = ev->type == FocusIn;
-	if (IS_SET(MODE_FOCUS))
+
+	if (term.focus)
 		ttywrite(xw.focused ? "\033[I" : "\033[O", 3);
 }
 
@@ -1094,10 +1038,9 @@ static void bmotion(XEvent *e)
 {
 	XButtonEvent *ev = &e->xbutton;
 
-	if (IS_SET(MODE_MOUSE) && !(ev->state & forceselmod)) {
+	if (term.mouse && !(ev->state & forceselmod)) {
 		mousereport(ev);
 	} else if (ev->state & (Button1Mask | Button3Mask)) {
-		sel.active = true;
 		sel.oe = ev2point(ev);
 		selnormalize();
 	}
@@ -1108,20 +1051,23 @@ static void bpress(XEvent *e)
 	XButtonEvent *ev = &e->xbutton;
 	Point point = ev2point(ev);
 
-	if (IS_SET(MODE_MOUSE) && !(ev->state & forceselmod))
+	if (term.mouse && !(ev->state & forceselmod))
 		mousereport(ev);
 
 	switch (ev->button) {
 	case Button1:
-		sel.active = sel.oe.x == point.x && sel.oe.y == point.y;
 		sel.alt = term.alt;
-		sel.snap = sel.active ? MIN(sel.snap + 1, SNAP_LINE) : 0;
-		sel.ob = sel.oe = point;
-		selnormalize();
+		if (sel.ob.x == point.x && sel.ob.y == point.y) {
+			sel.snap = MIN(sel.snap + 1, SNAP_LINE);
+			selnormalize();
+		} else {
+			sel.ob = sel.oe = point;
+			sel.ne.y = -1;
+			sel.snap = 0;
+		}
 		break;
 	case Button3:
 		sel.snap = SNAP_LINE;
-		sel.active = true;
 		sel.oe = ev2point(ev);
 		selnormalize();
 		break;
@@ -1138,17 +1084,17 @@ static void brelease(XEvent *e)
 {
 	XButtonEvent *ev = &e->xbutton;
 
-	if (IS_SET(MODE_MOUSE) && !(ev->state & forceselmod))
+	if (term.mouse && !(ev->state & forceselmod))
 		mousereport(ev);
 	else if (ev->button == Button2)
 		selpaste();
-	else if (sel.active && (ev->button == Button1 || ev->button == Button3))
+	else if (ev->button == Button1 || ev->button == Button3)
 		selcopy();
 }
 
 static void selclear(__attribute__((unused)) XEvent *e)
 {
-	sel.active = false;
+	sel.ne.y = -1;
 }
 
 static void ttynew(void)
@@ -1264,26 +1210,21 @@ static void tsetmode(bool set, int arg)
 {
 	switch (arg) {
 	case 1: // DECCKM -- Cursor key
-		MODBIT(term.mode, set, MODE_APPCURSOR);
+		term.appcursor = set;
 		break;
 	case 4: // IRM -- Insert Mode (TODO)
 		break;
 	case 6: // DECOM -- Origin
-		MODBIT(term.mode, set, MODE_ABSMOVE);
+		term.absmove = set;
 		tmoveato(0, 0);
 		break;
 	case 7: // DECAWM -- Auto wrap
-		MODBIT(term.mode, set, MODE_WRAP);
-		break;
-	case 9: // X10 mouse compatibility mode
-		xsetpointermotion(0);
-		MODBIT(term.mode, 0, MODE_MOUSE);
-		MODBIT(term.mode, set, MODE_MOUSEX10);
+		term.wrap = set;
 		break;
 	case 12: // SRM -- Send/receive (TODO)
 		break;
 	case 25: // DECTCEM -- Text Cursor Enable Mode
-		MODBIT(term.mode, !set, MODE_HIDE);
+		term.hide = !set;
 		break;
 	case 47:
 	case 1047:
@@ -1296,29 +1237,21 @@ static void tsetmode(bool set, int arg)
 			tclearregion(0, 0, term.col - 1, term.row -1);
 		tcursor(CURSOR_LOAD);
 		break;
-	case 1000: // Report button presses
-		xsetpointermotion(0);
-		MODBIT(term.mode, 0, MODE_MOUSE);
-		MODBIT(term.mode, set, MODE_MOUSEBTN);
-		break;
-	case 1002: // Report motion on button press
-		xsetpointermotion(0);
-		MODBIT(term.mode, 0, MODE_MOUSE);
-		MODBIT(term.mode, set, MODE_MOUSEMOTION);
-		break;
-	case 1003: // Report all mouse motions
-		xsetpointermotion(set);
-		MODBIT(term.mode, 0, MODE_MOUSE);
-		MODBIT(term.mode, set, MODE_MOUSEMANY);
+	case MOUSE_X10:
+	case MOUSE_BTN:
+	case MOUSE_MOTION:
+	case MOUSE_MANY:
+	case MOUSE_SGR:
+		xw.attrs.event_mask &= ~PointerMotionMask;
+		xw.attrs.event_mask |= set * PointerMotionMask;
+		XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &xw.attrs);
+		term.mouse = set * arg;
 		break;
 	case 1004: // Report focus events
-		MODBIT(term.mode, set, MODE_FOCUS);
-		break;
-	case 1006: // Extended mouse reporting
-		MODBIT(term.mode, set, MODE_MOUSESGR);
+		term.focus = set;
 		break;
 	case 2004: // Bracketed paste mode
-		MODBIT(term.mode, set, MODE_BRCKTPASTE);
+		term.bracket_paste = set;
 		break;
 	default:
 		ERRESC("unknown set/reset mode %d\n", arg);
@@ -1558,7 +1491,7 @@ static void tcontrolcode(u8 ascii)
 		break;
 	case '\016': // LS1 -- Locking shift 1)
 	case '\017': // LS0 -- Locking shift 0)
-		MODBIT(term.mode, ascii == '\016', MODE_ALTCHARSET);
+		term.charset = ascii == '\016';
 		break;
 	case '\030': // CAN
 		term.esc = ESC_NONE;
@@ -1597,8 +1530,8 @@ static void tputc(Rune u)
 		return;
 	}
 
-	if (sel.active && BETWEEN(term.c.y, sel.ob.y, sel.oe.y))
-		sel.active = false;
+	if (BETWEEN(term.c.y, sel.ob.y, sel.oe.y))
+		sel.ne.y = -1;
 
 	if (term.c.x >= term.col)
 		tnewline(true);
@@ -1625,7 +1558,7 @@ static size_t ttyread(void)
 		die("Couldn't read from shell: %s\n", strerror(errno));
 
 	// Reset scroll
-	if (!IS_SET(MODE_APPCURSOR))
+	if (!term.appcursor)
 		term.scroll = term.lines;
 
 	// Decode UTF-8
