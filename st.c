@@ -8,6 +8,7 @@
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
 #include <X11/extensions/Xrender.h>
+#include <assert.h>
 #include <errno.h>
 #include <fontconfig/fontconfig.h>
 #include <libgen.h>
@@ -343,8 +344,8 @@ static void xinit(void)
 			die("Could not allocate color %d\n", i);
 
 	// Set geometry to some arbitrary values while we wait for the resize event
-	xw.w = 2 * borderpx;
-	xw.h = 2 * borderpx;
+	xw.w = term.col * xw.cw + 2 * borderpx;
+	xw.h = term.row * xw.ch + 2 * borderpx;
 
 	// Events
 	xw.attrs.background_pixel = dc.col[defaultbg].pixel;
@@ -1320,7 +1321,7 @@ static void tcontrolcode(u8 ascii)
 		tputtab(1);
 		break;
 	case '\b':
-		tmoveto(term.c.x-1, term.c.y);
+		tmoveto(term.c.x - 1, term.c.y);
 		break;
 	case '\r':
 		tmoveto(0, term.c.y);
@@ -1418,7 +1419,7 @@ static size_t ttyread(void)
 
 	ssize_t buf_len = read(ttyfd, buf, BUFSIZ);
 	if (buf_len < 0)
-		die("Couldn't read from shell: %s\n", strerror(errno));
+		exit(0);
 
 	// Reset scroll
 	if (!term.alt)
@@ -1491,6 +1492,8 @@ int main(int argc, char *argv[])
 	if (argc > 1)
 		opt_cmd = argv + 1;
 
+	term.row = 24;
+	term.col = 80;
 	setlocale(LC_CTYPE, "");
 	treset(true);
 	xinit();
