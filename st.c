@@ -53,13 +53,14 @@
 
 typedef enum {
 	ATTR_BOLD       = 1 << 0,
-	ATTR_ITALIC     = 1 << 1,
-	ATTR_FAINT      = 1 << 2,
+	ATTR_FAINT      = 1 << 1,
+	ATTR_ITALIC     = 1 << 2,
 	ATTR_UNDERLINE  = 1 << 3,
-	ATTR_REVERSE    = 1 << 4,
-	ATTR_INVISIBLE  = 1 << 5,
-	ATTR_STRUCK     = 1 << 6,
-	ATTR_BAR        = 1 << 7,
+	ATTR_BLINK      = 1 << 4,
+	ATTR_BAR        = 1 << 5,
+	ATTR_REVERSE    = 1 << 6,
+	ATTR_INVISIBLE  = 1 << 7,
+	ATTR_STRUCK     = 1 << 8,
 } glyph_attribute;
 
 typedef enum {
@@ -252,8 +253,8 @@ static void xloadfonts(char *fontstr)
 	for (int i = 0; i < 4; ++i) {
 		FcPatternDel(pattern, FC_SLANT);
 		FcPatternDel(pattern, FC_WEIGHT);
-		FcPatternAddInteger(pattern, FC_SLANT, i & ATTR_ITALIC ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
-		FcPatternAddInteger(pattern, FC_WEIGHT, i & ATTR_BOLD ? FC_WEIGHT_BOLD : FC_WEIGHT_NORMAL);
+		FcPatternAddInteger(pattern, FC_SLANT, (i & 2) ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
+		FcPatternAddInteger(pattern, FC_WEIGHT, (i & 1) ? FC_WEIGHT_BOLD : FC_WEIGHT_NORMAL);
 		FcPattern *match = XftFontMatch(xw.dpy, xw.scr, pattern, &result);
 		dc.font[i] = XftFontOpenPattern(xw.dpy, match);
 		FcPatternDestroy(match);
@@ -314,7 +315,9 @@ static void xinit(void)
 
 static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 {
-	XftFont *font = dc.font[glyph.mode & (ATTR_BOLD | ATTR_ITALIC)];
+	bool bold = (glyph.mode & ATTR_BOLD) != 0;
+	bool italic = (glyph.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
+	XftFont *font = dc.font[bold + 2 * italic];
 	Color *fg = &dc.col[glyph.fg ? glyph.fg : DEFAULTFG];
 	Color *bg = &dc.col[glyph.bg];
 
@@ -768,46 +771,11 @@ static void tsetattr(int attr)
 	case 0:
 		memset(&term.c.attr, 0, sizeof(term.c.attr));
 		break;
-	case 1:
-		term.c.attr.mode |= ATTR_BOLD;
+	case 1 ... 9:
+		term.c.attr.mode |= 1 << (attr - 1);
 		break;
-	case 2:
-		term.c.attr.mode |= ATTR_FAINT;
-		break;
-	case 3:
-	case 5:
-		term.c.attr.mode |= ATTR_ITALIC;
-		break;
-	case 4:
-		term.c.attr.mode |= ATTR_UNDERLINE;
-		break;
-	case 7:
-		term.c.attr.mode |= ATTR_REVERSE;
-		break;
-	case 8:
-		term.c.attr.mode |= ATTR_INVISIBLE;
-		break;
-	case 9:
-		term.c.attr.mode |= ATTR_STRUCK;
-		break;
-	case 22:
-		term.c.attr.mode &= ~(ATTR_BOLD | ATTR_FAINT);
-		break;
-	case 23:
-	case 25:
-		term.c.attr.mode &= ~ATTR_ITALIC;
-		break;
-	case 24:
-		term.c.attr.mode &= ~ATTR_UNDERLINE;
-		break;
-	case 27:
-		term.c.attr.mode &= ~ATTR_REVERSE;
-		break;
-	case 28:
-		term.c.attr.mode &= ~ATTR_INVISIBLE;
-		break;
-	case 29:
-		term.c.attr.mode &= ~ATTR_STRUCK;
+	case 21 ... 29:
+		term.c.attr.mode &= ~(1 << (attr - 21));
 		break;
 	case 30 ... 37:
 		term.c.attr.fg = (u8) (attr - 30);
