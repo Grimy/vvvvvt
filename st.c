@@ -408,6 +408,8 @@ static void draw(void)
 	for (int y = 0; y < term.row; ++y)
 		for (int x = 0; x < term.col; ++x)
 			xdrawglyph(x, y);
+	// Flush
+	xdrawglyph(0, 0);
 
 	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, xw.w, xw.h, 0, 0);
 	XSetForeground(xw.dpy, dc.gc, dc.col[0].pixel);
@@ -874,6 +876,8 @@ static void tsetattr(int attr)
 static void tsetmode(bool set, int arg)
 {
 	switch (arg) {
+	case 1: // DECCKM -- Cursor key (ignored)
+		break;
 	case 7: // DECAWM -- Auto wrap
 		term.wrap = set;
 		break;
@@ -882,7 +886,6 @@ static void tsetmode(bool set, int arg)
 	case 25: // DECTCEM -- Text Cursor Enable Mode
 		term.hide = !set;
 		break;
-	case 1: // DECCKM -- Cursor key
 	case 47:
 	case 1047:
 	case 1048:
@@ -1231,7 +1234,6 @@ static void __attribute__((noreturn)) run(void)
 
 		if (dirty && TIMEDIFF(now, last) > 1000 / FPS) {
 			draw();
-			XFlush(xw.dpy);
 			dirty = false;
 			last = now;
 		}
