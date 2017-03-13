@@ -434,7 +434,7 @@ static void tscroll(int n)
 {
 	if (!term.alt) {
 		term.scroll += n;
-		LIMIT(term.scroll, 0, term.lines);
+		LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + term.row), term.lines);
 	} else if (n > 0) {
 		for (int y = term.top; y <= term.bot - n; ++y)
 			memcpy(TLINE(y), TLINE(y + n), sizeof(TLINE(y)));
@@ -1084,7 +1084,7 @@ static void tputc(u8 u)
 		return;
 	}
 
-	if (BETWEEN(term.c.y, sel.ob.y, sel.oe.y))
+	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
 		sel.ne.y = -1;
 
 	if (term.c.x >= term.col)
