@@ -1,7 +1,6 @@
 /* See LICENSE file for copyright and license details. */
 
 #include <X11/X.h>
-#include <X11/XKBlib.h>
 #include <X11/Xft/Xft.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -23,18 +22,7 @@
 #include <unistd.h>
 
 #include "colors.c"
-
-// Config
-#define FONT_SIZE 12
-#define LINE_SIZE 256
-#define HIST_SIZE 2048
-#define FPS 60
-#define DEFAULTFG 15
-#define bellvolume 12
-#define vtiden "\033[?6c"
-#define borderpx 2
-#define fontname "Hack:antialias=true:autohint=true"
-#define shell "/bin/zsh"
+#include "config.h"
 
 // Macros
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
@@ -201,13 +189,13 @@ static Key key[] = {
 };
 
 static int ttyfd;
-static char **opt_cmd = (char*[]) { shell, NULL };
+static char **opt_cmd = (char*[]) { SHELL, NULL };
 static void (*handler[LASTEvent])(XEvent *);
 
 static Point ev2point(XButtonEvent *e)
 {
-	int x = (e->x - borderpx) / xw.cw;
-	int y = (e->y - borderpx) / xw.ch;
+	int x = (e->x - BORDERPX) / xw.cw;
+	int y = (e->y - BORDERPX) / xw.ch;
 	LIMIT(x, 0, term.col - 1);
 	LIMIT(y, 0, term.row - 1);
 	return (Point) { x, y + term.scroll };
@@ -275,7 +263,7 @@ static void xinit(void)
 	// Fonts
 	if (!FcInit())
 		die("Could not init fontconfig.\n");
-	xloadfonts(fontname);
+	xloadfonts(FONTNAME);
 
 	// Colors
 	Colormap cmap = XDefaultColormap(xw.dpy, xw.scr);
@@ -284,8 +272,8 @@ static void xinit(void)
 			die("Could not allocate color %d\n", i);
 
 	// Set geometry to some arbitrary values while we wait for the resize event
-	xw.w = term.col * xw.cw + 2 * borderpx;
-	xw.h = term.row * xw.ch + 2 * borderpx;
+	xw.w = term.col * xw.cw + 2 * BORDERPX;
+	xw.h = term.row * xw.ch + 2 * BORDERPX;
 
 	// Events
 	xw.attrs.background_pixel = dc.col[0].pixel;
@@ -370,8 +358,8 @@ static void xdrawglyph(int x, int y)
 	bool diff = glyph.fg != prev.fg || glyph.bg != prev.bg || glyph.mode != prev.mode;
 
 	if (x == 0 || diff) {
-		int xp = borderpx + old_x * xw.cw;
-		int yp = borderpx + old_y * xw.ch;
+		int xp = BORDERPX + old_x * xw.cw;
+		int yp = BORDERPX + old_y * xw.ch;
 		xdrawglyphfontspec(prev, buf, len, xp, yp);
 		len = 0;
 		old_x = x;
@@ -596,8 +584,8 @@ static void tnewline(bool first_col)
 
 static void resize(int width, int height)
 {
-	int col = (width - 2 * borderpx) / xw.cw;
-	int row = (height - 2 * borderpx) / xw.ch;
+	int col = (width - 2 * BORDERPX) / xw.cw;
+	int row = (height - 2 * BORDERPX) / xw.ch;
 
 	// Update terminal info
 	term.col = col;
@@ -916,7 +904,7 @@ static void csihandle(char command, int *arg, u32 nargs)
 		break;
 	case 'c': // DA -- Device Attributes
 		if (arg[0] == 0)
-			ttywrite(vtiden, sizeof(vtiden) - 1);
+			ttywrite(VTIDEN, sizeof(VTIDEN) - 1);
 		break;
 	case 'd': // VPA -- Move to <row>
 		tmoveto(term.c.x, arg[0] - 1);
@@ -1001,7 +989,7 @@ static escape_state eschandle(u8 ascii)
 			--term.c.y;
 		return ESC_NONE;
 	case 'Z': // DECID -- Identify Terminal
-		ttywrite(vtiden, sizeof(vtiden) - 1);
+		ttywrite(VTIDEN, sizeof(VTIDEN) - 1);
 		return ESC_NONE;
 	case 'c': // RIS -- Reset to inital state
 		memset(&term, 0, sizeof(term));
@@ -1034,10 +1022,6 @@ static void tcontrolcode(u8 ascii)
 	case '\v':
 	case '\n':
 		tnewline(false);
-		break;
-	case '\a':
-		if (!xw.focused)
-			XkbBell(xw.dpy, xw.win, bellvolume, (Atom) NULL);
 		break;
 	case '\033': // ESC
 		term.esc = ESC_START;

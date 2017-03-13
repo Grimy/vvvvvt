@@ -18,7 +18,7 @@ CFLAGS += -g -std=c99 -Weverything -Werror -O3 -fno-inline ${INCS} ${CPPFLAGS}
 CFLAGS += -Wno-sign-conversion -Wno-switch -Wno-gnu-case-range
 LDFLAGS += -g ${LIBS}
 
-st: st.c colors.c Makefile
+st: st.c colors.c config.h Makefile
 	@echo CC $@
 	@$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
 
