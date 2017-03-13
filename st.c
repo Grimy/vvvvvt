@@ -28,15 +28,14 @@
 #include "colors.c"
 
 // Config
-#define FONT_SIZE 11
+#define FONT_SIZE 12
 #define LINE_SIZE 256
 #define HIST_SIZE 2048
 #define FPS 60
-#define defaultfg 15
-#define defaultbg 0
+#define DEFAULTFG 15
 #define bellvolume 12
 #define vtiden "\033[?6c"
-#define borderpx 5
+#define borderpx 2
 #define fontname "Hack:antialias=true:autohint=true"
 #define shell "/bin/zsh"
 
@@ -348,7 +347,7 @@ static void xinit(void)
 	xw.h = term.row * xw.ch + 2 * borderpx;
 
 	// Events
-	xw.attrs.background_pixel = dc.col[defaultbg].pixel;
+	xw.attrs.background_pixel = dc.col[0].pixel;
 	xw.attrs.event_mask = FocusChangeMask | KeyPressMask
 		| VisibilityChangeMask | StructureNotifyMask
 		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
@@ -384,7 +383,7 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 	int width = xw.cw * len;
 	// XRectangle r = { 0, 0, (u16) width, (u16) xw.ch };
 
-	fg = &dc.col[glyph.fg];
+	fg = &dc.col[glyph.fg ? glyph.fg : DEFAULTFG];
 	bg = &dc.col[glyph.bg];
 
 	if (glyph.mode & ATTR_REVERSE)
@@ -446,7 +445,7 @@ static void xdrawglyph(int x, int y)
 	}
 
 	for (int i = 0; i < UTF_LEN(*glyph.u); ++i)
-		buf[len++] = glyph.u[i];
+		buf[len++] = MAX(glyph.u[i], ' ');
 }
 
 static void draw(void)
@@ -454,14 +453,14 @@ static void draw(void)
 	if (!xw.visible)
 		return;
 
-	XftDrawRect(xw.draw, &dc.col[defaultbg], 0, 0, xw.w, xw.h);
+	XftDrawRect(xw.draw, dc.col, 0, 0, xw.w, xw.h);
 
 	for (int y = 0; y < term.row; ++y)
 		for (int x = 0; x < term.col; ++x)
 			xdrawglyph(x, y);
 
 	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, xw.w, xw.h, 0, 0);
-	XSetForeground(xw.dpy, dc.gc, dc.col[defaultbg].pixel);
+	XSetForeground(xw.dpy, dc.gc, dc.col[0].pixel);
 }
 
 static void ttywrite(const char *buf, size_t n)
@@ -490,15 +489,8 @@ static void tclearregion(int x1, int y1, int x2, int y2)
 	if (sel.nb.y <= y2 && sel.ne.y >= y1)
 		sel.ne.y = -1;
 
-	for (int y = y1; y <= y2; y++) {
-		for (int x = x1; x <= x2; x++) {
-			Glyph *gp = &TLINE(y)[x];
-			gp->fg = term.c.attr.fg;
-			gp->bg = term.c.attr.bg;
-			gp->mode = 0;
-			gp->u[0] = ' ';
-		}
-	}
+	for (int y = y1; y <= y2; y++)
+		memset(TLINE(y) + x1, 0, (x2 - x1) * sizeof(Glyph));
 }
 
 static void tscroll(int n)
@@ -509,41 +501,18 @@ static void tscroll(int n)
 		tclearregion(0, term.c.y, term.col - 1, term.c.y);
 }
 
-static int tlinelen(int y)
-{
-	int i = term.col;
-
-	if (TLINE(y)[i - 1].mode & ATTR_WRAP)
-		return i;
-
-	while (i > 0 && TLINE(y)[i - 1].u[0] == ' ')
-		--i;
-
-	return i;
-}
-
 // append every set & selected glyph to the selection
 static void getsel(FILE* pipe)
 {
-	int y, lastx, linelen;
-
-	for (y = sel.nb.y; y <= sel.ne.y; y++) {
-		if ((linelen = tlinelen(y)) == 0) {
-			fprintf(pipe, "\n");
-			continue;
-		}
-
+	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
 		Glyph *line = term.hist[y % HIST_SIZE];
+		int x1 = sel.nb.y == y ? sel.nb.x : 0;
+		int x2 = sel.ne.y == y ? sel.ne.x : term.col - 1;
+		int x;
 
-		lastx = (sel.ne.y == y) ? sel.ne.x : term.col-1;
-		Glyph *last = &line[MIN(lastx, linelen - 1)];
-		while (last->u[0] == ' ')
-			--last;
-
-		for (Glyph *gp = &line[sel.nb.y == y ? sel.nb.x : 0]; gp <= last; ++gp)
-			fprintf(pipe, "%.4s", gp->u);
-
-		if ((y < sel.ne.y || lastx >= linelen) && !(last->mode & ATTR_WRAP))
+		for (x = x1; x <= x2 && *line[x].u; ++x)
+			fprintf(pipe, "%.4s", line[x].u);
+		if (x <= x2)
 			fprintf(pipe, "\n");
 	}
 }
@@ -729,7 +698,7 @@ static void tnewline(bool first_col)
 
 static void treset(bool hard_reset)
 {
-	term.c = (TCursor) {{ .fg = defaultfg, .bg = defaultbg }, .x = 0, .y = 0 };
+	term.c = (TCursor) {{ .fg = 0, .bg = 0 }, .x = 0, .y = 0 };
 	tsetscroll(0, term.row - 1);
 	term.alt = term.hide = term.focus = term.charset = term.bracket_paste = false;
 	term.wrap = true;
@@ -758,7 +727,7 @@ static void resize(int width, int height)
 	XFreePixmap(xw.dpy, xw.buf);
 	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, xw.scr));
 	XftDrawChange(xw.draw, xw.buf);
-	XftDrawRect(xw.draw, &dc.col[defaultbg], 0, 0, xw.w, xw.h);
+	XftDrawRect(xw.draw, dc.col, 0, 0, xw.w, xw.h);
 
 	// Send our size to the tty driver so that applications can query it
 	struct winsize w = { (u16) term.row, (u16) term.col, 0, 0 };
@@ -912,16 +881,7 @@ static void tsetattr(int attr)
 {
 	switch (attr) {
 	case 0:
-		term.c.attr.mode &= ~(
-			ATTR_BOLD       |
-			ATTR_FAINT      |
-			ATTR_ITALIC     |
-			ATTR_UNDERLINE  |
-			ATTR_REVERSE    |
-			ATTR_INVISIBLE  |
-			ATTR_STRUCK     );
-		term.c.attr.fg = defaultfg;
-		term.c.attr.bg = defaultbg;
+		memset(&term.c.attr, 0, sizeof(term.c.attr));
 		break;
 	case 1:
 		term.c.attr.mode |= ATTR_BOLD;
@@ -968,13 +928,13 @@ static void tsetattr(int attr)
 		term.c.attr.fg = (u8) (attr - 30);
 		break;
 	case 39:
-		term.c.attr.fg = defaultfg;
+		term.c.attr.fg = 0;
 		break;
 	case 40 ... 47:
 		term.c.attr.bg = (u8) (attr - 40);
 		break;
 	case 49:
-		term.c.attr.bg = defaultbg;
+		term.c.attr.bg = 0;
 		break;
 	case 90 ... 97:
 		term.c.attr.fg = (u8) (attr - 90 + 8);
@@ -1007,7 +967,7 @@ static void tsetmode(bool set, int arg)
 		if (set ^ term.alt)
 			tswapscreen();
 		if (set)
-			tclearregion(0, 0, term.col - 1, term.row -1);
+			tclearregion(0, 0, term.col - 1, term.row - 1);
 		break;
 	case MOUSE_X10:
 	case MOUSE_BTN:
@@ -1081,12 +1041,10 @@ static void csihandle(char command, int *arg, u32 nargs)
 		switch (arg[0]) {
 		case 0: // below
 			tclearregion(term.c.x, term.c.y, term.col - 1, term.c.y);
-			if (term.c.y < term.row-1)
-				tclearregion(0, term.c.y+1, term.col-1, term.row-1);
+			tclearregion(0, term.c.y + 1, term.col - 1, term.row - 1);
 			break;
 		case 1: // above
-			if (term.c.y > 1)
-				tclearregion(0, 0, term.col - 1, term.c.y - 1);
+			tclearregion(0, 0, term.col - 1, term.c.y - 1);
 			tclearregion(0, term.c.y, term.c.x, term.c.y);
 			break;
 		case 2: // all

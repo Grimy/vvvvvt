@@ -4,5 +4,4 @@
 * Refactor mousereport, tdeletechar, tinstertblank, tclearregion
 * Merge {i,}{b,}font into an array
 * Inline internal shortcuts
-* Use '\0' instead of ' '
 * Selecting inside Vim doesn’t work
