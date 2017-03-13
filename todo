@@ -1,6 +1,4 @@
 * Fix htop
-* Fix sl
-* Fix vim’s status line
 * Refactor mousereport, tdeletechar, tinstertblank, tclearregion
 * Inline internal shortcuts
 * Selecting inside Vim doesn’t work

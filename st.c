@@ -39,7 +39,7 @@
 #define fontname "Hack:antialias=true:autohint=true"
 #define shell "/bin/zsh"
 
-// macros
+// Macros
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
 #define MAX(a, b)		((a) < (b) ? (b) : (a))
 #define LEN(a)			(sizeof(a) / sizeof(a)[0])
@@ -64,9 +64,7 @@ typedef enum {
 	ATTR_REVERSE    = 1 << 4,
 	ATTR_INVISIBLE  = 1 << 5,
 	ATTR_STRUCK     = 1 << 6,
-	ATTR_WRAP       = 1 << 7,
-	ATTR_BAR        = 1 << 8,
-	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
+	ATTR_BAR        = 1 << 7,
 } glyph_attribute;
 
 typedef enum {
@@ -370,7 +368,6 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 
 	int y = winy + font->ascent;
 	int width = xw.cw * len;
-	// XRectangle r = { 0, 0, (u16) width, (u16) xw.ch };
 
 	if (glyph.mode & ATTR_REVERSE)
 		SWAP(fg, bg);
@@ -380,9 +377,6 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 
 	// Render the background
 	XftDrawRect(xw.draw, bg, x, winy, width, xw.ch);
-
-	// Set the clip region because Xft is sometimes dirty
-	// XftDrawSetClipRectangles(xw.draw, x, winy, &r, 1);
 
 	// Render the glyphs
 	XftDrawStringUtf8(xw.draw, fg, font, x, y, buf, len);
@@ -396,9 +390,6 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 
 	if (glyph.mode & ATTR_BAR)
 		XftDrawRect(xw.draw, fg, x + 2, winy, 2, xw.ch);
-
-	// Reset clip to none
-	// XftDrawSetClip(xw.draw, 0);
 }
 
 static void xdrawglyph(int x, int y)
@@ -421,8 +412,8 @@ static void xdrawglyph(int x, int y)
 		glyph.mode ^= cursor;
 
 	if (ATTRCMP(glyph, prev) || x == 0) {
-		short xp = (short) (borderpx + old_x * xw.cw);
-		short yp = (short) (borderpx + old_y * xw.ch);
+		int xp = borderpx + old_x * xw.cw;
+		int yp = borderpx + old_y * xw.ch;
 		xdrawglyphfontspec(prev, buf, len, xp, yp);
 		len = 0;
 		old_x = x;
@@ -476,15 +467,13 @@ static void tclearregion(int x1, int y1, int x2, int y2)
 		sel.ne.y = -1;
 
 	for (int y = y1; y <= y2; y++)
-		memset(TLINE(y) + x1, 0, (x2 - x1) * sizeof(Glyph));
+		memset(TLINE(y) + x1, 0, (x2 - x1 + 1) * sizeof(Glyph));
 }
 
 static void tscroll(int n)
 {
 	term.scroll += n;
 	LIMIT(term.scroll, 0, term.lines);
-	if (term.alt)
-		tclearregion(0, term.c.y, term.col - 1, term.c.y);
 }
 
 // append every set & selected glyph to the selection
@@ -674,7 +663,7 @@ static void tnewline(bool first_col)
 	if (term.c.y == term.bot) {
 		++term.lines;
 		tscroll(1);
-		tclearregion(0, term.c.y, term.col - 1, term.c.y);
+		tclearregion(0, term.bot, term.col - 1, term.row - 1);
 	} else {
 		++term.c.y;
 	}
@@ -892,7 +881,7 @@ static void tsetattr(int attr)
 		term.c.attr.mode |= ATTR_STRUCK;
 		break;
 	case 22:
-		term.c.attr.mode &= ~ATTR_BOLD_FAINT;
+		term.c.attr.mode &= ~(ATTR_BOLD | ATTR_FAINT);
 		break;
 	case 23:
 	case 25:
@@ -1264,12 +1253,10 @@ static void tputc(u8 u)
 		return;
 	i = 0;
 
-	if (term.c.x + 1 < term.col) {
+	if (term.c.x + 1 < term.col)
 		tmoveto(term.c.x + 1, term.c.y);
-	} else {
-		TLINE(term.c.y)[term.c.x].mode |= ATTR_WRAP;
+	else
 		tnewline(true);
-	}
 }
 
 static size_t ttyread(void)
