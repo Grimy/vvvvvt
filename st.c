@@ -2,17 +2,15 @@
 
 #include <X11/X.h>
 #include <X11/XKBlib.h>
-#include <X11/Xatom.h>
 #include <X11/Xft/Xft.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
 #include <X11/extensions/Xrender.h>
+#include <X11/keysym.h>
 #include <assert.h>
 #include <errno.h>
 #include <fontconfig/fontconfig.h>
-#include <libgen.h>
-#include <limits.h>
 #include <locale.h>
 #include <pty.h>
 #include <signal.h>
@@ -53,7 +51,6 @@
 #define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define ERRESC(...)		die("erresc: " __VA_ARGS__)
-#define ATTRCMP(a, b)		((a).mode != (b).mode || (a).fg != (b).fg || (a).bg != (b).bg)
 #define UTF_LEN(u)		((u) < 192 ? 1 : (u) < 224 ? 2 : u < 240 ? 3 : 4)
 
 typedef enum {
@@ -408,10 +405,14 @@ static void xdrawglyph(int x, int y)
 
 	if (sel.alt == term.alt && selected(x, y + term.scroll))
 		glyph.mode ^= ATTR_REVERSE;
+
 	if (x == term.c.x && y == term.c.y)
 		glyph.mode ^= cursor;
 
-	if (ATTRCMP(glyph, prev) || x == 0) {
+	// bool color_change = *glyph.u && (glyph.fg != prev.fg || glyph.bg != prev.bg);
+	bool color_change = (glyph.fg != prev.fg || glyph.bg != prev.bg);
+	
+	if (x == 0 || glyph.mode != prev.mode || color_change) {
 		int xp = borderpx + old_x * xw.cw;
 		int yp = borderpx + old_y * xw.ch;
 		xdrawglyphfontspec(prev, buf, len, xp, yp);
@@ -1232,26 +1233,21 @@ static void tputc(u8 u)
 	if (term.c.x >= term.col)
 		tnewline(true);
 
-	// TODO graphic chars
-	// static int vt100_0[] = {
-		// 0x256c, 0x2592, 0, 0, 0, 0, 0xb0, 0xb1,            // ` - g
-		// 0, 0, 0x2518, 0x2510, 0x250c, 0x2514, 0x253c, 0,   // h - o
-		// 0, 0x2500, 0, 0, 0x251c, 0x2524, 0x2534, 0x252c,   // p - w
-		// 0x2502, 0x2264, 0x2265, 0x3c0, 0x2260, 0xa3, 0xb7, // x - ~
-	// };
-
-	// if (term.charset && BETWEEN(glyph->u[-1], '`', '~'))
-		// glyph->u = vt100_0[glyph->u[0] - '`'];
-
-
-	static int i;
-	if (i == 0)
-		TLINE(term.c.y)[term.c.x] = term.c.attr;
-	TLINE(term.c.y)[term.c.x].u[i++] = u;
-	u8 tmp = TLINE(term.c.y)[term.c.x].u[0];
-	if (i < UTF_LEN(tmp))
+	static u8 *p;
+	if (BETWEEN(u, 128, 192)) {
+		// UTF-8 continuation byte
+		*p++ = u;
 		return;
-	i = 0;
+	}
+
+	Glyph *glyph = &TLINE(term.c.y)[term.c.x];
+	*glyph = term.c.attr;
+	p = glyph->u;
+	*p++ = u;
+
+	static const char* vt100_0 = "◆▒␉␌␍␊°X±X␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥πX≠£X·X";
+	if (term.charset && BETWEEN(u, '`', '~'))
+		memcpy(glyph->u, vt100_0 + (u - '`') * 3, 3);
 
 	if (term.c.x + 1 < term.col)
 		tmoveto(term.c.x + 1, term.c.y);
