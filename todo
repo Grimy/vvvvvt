@@ -2,6 +2,5 @@
 * Fix sl
 * Fix vim’s status line
 * Refactor mousereport, tdeletechar, tinstertblank, tclearregion
-* Merge {i,}{b,}font into an array
 * Inline internal shortcuts
 * Selecting inside Vim doesn’t work

@@ -228,7 +228,7 @@ static struct {
 // Drawing Context
 static struct {
 	Color col[256];
-	XftFont *font, *bfont, *ifont, *ibfont;
+	XftFont *font[4];
 	GC gc;
 } dc;
 
@@ -240,8 +240,8 @@ static Point ev2point(XButtonEvent *e)
 {
 	int x = (e->x - borderpx) / xw.cw;
 	int y = (e->y - borderpx) / xw.ch;
-	LIMIT(x, 0, term.col-1);
-	LIMIT(y, 0, term.row-1);
+	LIMIT(x, 0, term.col - 1);
+	LIMIT(y, 0, term.row - 1);
 	return (Point) { x, y + term.scroll };
 }
 
@@ -296,30 +296,20 @@ static void xloadfont(XftFont **f, FcPattern *pattern)
 
 static void xloadfonts(char *fontstr)
 {
-	FcPattern *pattern;
-
-	if (fontstr[0] == '-')
-		pattern = XftXlfdParse(fontstr, False, False);
-	else
-		pattern = FcNameParse((FcChar8 *)fontstr);
+	FcPattern *pattern = FcNameParse((FcChar8 *) fontstr);
 
 	if (!pattern)
 		die("st: can't open font %s\n", fontstr);
 
 	FcPatternAddDouble(pattern, FC_SIZE, FONT_SIZE);
-	xloadfont(&dc.font, pattern);
 
-	FcPatternDel(pattern, FC_SLANT);
-	FcPatternAddInteger(pattern, FC_SLANT, FC_SLANT_ITALIC);
-	xloadfont(&dc.ifont, pattern);
-
-	FcPatternDel(pattern, FC_WEIGHT);
-	FcPatternAddInteger(pattern, FC_WEIGHT, FC_WEIGHT_BOLD);
-	xloadfont(&dc.ibfont, pattern);
-
-	FcPatternDel(pattern, FC_SLANT);
-	FcPatternAddInteger(pattern, FC_SLANT, FC_SLANT_ROMAN);
-	xloadfont(&dc.bfont, pattern);
+	for (int i = 0; i < 4; ++i) {
+		FcPatternDel(pattern, FC_SLANT);
+		FcPatternDel(pattern, FC_WEIGHT);
+		FcPatternAddInteger(pattern, FC_SLANT, i & ATTR_ITALIC ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
+		FcPatternAddInteger(pattern, FC_WEIGHT, i & ATTR_BOLD ? FC_WEIGHT_BOLD : FC_WEIGHT_NORMAL);
+		xloadfont(&dc.font[i], pattern);
+	}
 
 	FcPatternDestroy(pattern);
 }
@@ -374,17 +364,13 @@ static void xinit(void)
 
 static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 {
-	Color *fg, *bg;
-
-	// Determine font for glyph
-	XftFont *font = (XftFont*[]) { dc.font, dc.bfont, dc.ifont, dc.ibfont } [glyph.mode & (ATTR_BOLD | ATTR_ITALIC)];
+	XftFont *font = dc.font[glyph.mode & (ATTR_BOLD | ATTR_ITALIC)];
+	Color *fg = &dc.col[glyph.fg ? glyph.fg : DEFAULTFG];
+	Color *bg = &dc.col[glyph.bg];
 
 	int y = winy + font->ascent;
 	int width = xw.cw * len;
 	// XRectangle r = { 0, 0, (u16) width, (u16) xw.ch };
-
-	fg = &dc.col[glyph.fg ? glyph.fg : DEFAULTFG];
-	bg = &dc.col[glyph.bg];
 
 	if (glyph.mode & ATTR_REVERSE)
 		SWAP(fg, bg);
