@@ -1,5 +1,3 @@
-* Fix htop
-* Fix git show
 * Refactor mousereport, tdeletechar, tinstertblank, tclearregion
 * Inline internal shortcuts
 * Selecting inside Vim doesn’t work

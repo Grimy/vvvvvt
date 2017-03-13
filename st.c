@@ -47,7 +47,7 @@
 #define LIMIT(x, a, b)		((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define TIMEDIFF(t1, t2)	((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define SWAP(a, b)		do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
-#define TLINE(y)		(term.hist[term.alt ? HIST_SIZE + ((y) + term.scroll) % 64 : ((y) + term.scroll) % HIST_SIZE])
+#define TLINE(y)		(term.hist[term.alt ? HIST_SIZE + (y) % 64 : ((y) + term.scroll) % HIST_SIZE])
 #define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define ERRESC(...)		die("erresc: " __VA_ARGS__)
@@ -386,7 +386,7 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 		XftDrawRect(xw.draw, fg, x, (y + 2 * winy) / 3, xw.cw, 1);
 
 	if (glyph.mode & ATTR_BAR)
-		XftDrawRect(xw.draw, fg, x + 2, winy, 2, xw.ch);
+		XftDrawRect(xw.draw, fg, x, winy, 2, xw.ch);
 }
 
 static void xdrawglyph(int x, int y)
@@ -409,10 +409,9 @@ static void xdrawglyph(int x, int y)
 	if (x == term.c.x && y == term.c.y)
 		glyph.mode ^= cursor;
 
-	// bool color_change = *glyph.u && (glyph.fg != prev.fg || glyph.bg != prev.bg);
-	bool color_change = (glyph.fg != prev.fg || glyph.bg != prev.bg);
-	
-	if (x == 0 || glyph.mode != prev.mode || color_change) {
+	bool diff = glyph.fg != prev.fg || glyph.bg != prev.bg || glyph.mode != prev.mode;
+
+	if (x == 0 || diff) {
 		int xp = borderpx + old_x * xw.cw;
 		int yp = borderpx + old_y * xw.ch;
 		xdrawglyphfontspec(prev, buf, len, xp, yp);
@@ -454,27 +453,36 @@ static void ttywrite(const char *buf, size_t n)
 
 static void tclearregion(int x1, int y1, int x2, int y2)
 {
-	if (x1 > x2)
-		SWAP(x1, x2);
-	if (y1 > y2)
-		SWAP(y1, y2);
-
 	LIMIT(x1, 0, term.col - 1);
 	LIMIT(x2, 0, term.col - 1);
 	LIMIT(y1, 0, term.row - 1);
 	LIMIT(y2, 0, term.row - 1);
+	assert(y1 < y2 || (y1 == y2 && x1 <= x2));
 
 	if (sel.nb.y <= y2 && sel.ne.y >= y1)
 		sel.ne.y = -1;
 
-	for (int y = y1; y <= y2; y++)
-		memset(TLINE(y) + x1, 0, (x2 - x1 + 1) * sizeof(Glyph));
+	for (int y = y1; y <= y2; y++) {
+		int xstart = y == y1 ? x1 : 0;
+		int xend = y == y2 ? x2 : term.col - 1;
+		memset(TLINE(y) + xstart, 0, (xend - xstart + 1) * sizeof(Glyph));
+	}
 }
 
 static void tscroll(int n)
 {
-	term.scroll += n;
-	LIMIT(term.scroll, 0, term.lines);
+	if (!term.alt) {
+		term.scroll += n;
+		LIMIT(term.scroll, 0, term.lines);
+	} else if (n > 0) {
+		for (int y = term.top; y <= term.bot - n; ++y)
+			memcpy(TLINE(y), TLINE(y + n), sizeof(TLINE(y)));
+		tclearregion(0, term.bot - n + 1, term.col - 1, term.bot);
+	} else if (n < 0) {
+		for (int y = term.bot; y >= term.top - n; --y)
+			memcpy(TLINE(y), TLINE(y + n), sizeof(TLINE(y)));
+		tclearregion(0, term.top, term.col - 1, term.top - n - 1);
+	}
 }
 
 // append every set & selected glyph to the selection
@@ -662,9 +670,11 @@ static void tsetscroll(int a, int b)
 static void tnewline(bool first_col)
 {
 	if (term.c.y == term.bot) {
-		++term.lines;
+		if (!term.alt)
+			++term.lines;
 		tscroll(1);
-		tclearregion(0, term.bot, term.col - 1, term.row - 1);
+		if (!term.alt)
+			tclearregion(0, term.bot, term.col - 1, term.row - 1);
 	} else {
 		++term.c.y;
 	}
@@ -926,8 +936,6 @@ static void tsetattr(int attr)
 static void tsetmode(bool set, int arg)
 {
 	switch (arg) {
-	case 1: // DECCKM -- Cursor key (ignored)
-		break;
 	case 7: // DECAWM -- Auto wrap
 		term.wrap = set;
 		break;
@@ -936,6 +944,7 @@ static void tsetmode(bool set, int arg)
 	case 25: // DECTCEM -- Text Cursor Enable Mode
 		term.hide = !set;
 		break;
+	case 1: // DECCKM -- Cursor key
 	case 47:
 	case 1047:
 	case 1048:
@@ -977,30 +986,26 @@ static void csihandle(char command, int *arg, u32 nargs)
 		arg[0] = !strchr("JKcm", command);
 	if (arg[1] == 0)
 		arg[1] = 1;
+	if (strchr("ADFTZ", command))
+		arg[0] = -arg[0];
 
 	switch (command) {
 	case '@': // ICH -- Insert <n> blank char
 		tinsertblank(arg[0]);
 		break;
 	case 'A': // CUU -- Cursor <n> Up
-		tmoveto(term.c.x, term.c.y - arg[0]);
-		break;
 	case 'B': // CUD -- Cursor <n> Down
 	case 'e': // VPR -- Cursor <n> Down
 		tmoveto(term.c.x, term.c.y + arg[0]);
 		break;
 	case 'C': // CUF -- Cursor <n> Forward
+	case 'D': // CUB -- Cursor <n> Backward
 	case 'a': // HPR -- Cursor <n> Forward
 		tmoveto(term.c.x + arg[0], term.c.y);
 		break;
-	case 'D': // CUB -- Cursor <n> Backward
-		tmoveto(term.c.x - arg[0], term.c.y);
-		break;
 	case 'E': // CNL -- Cursor <n> Down and first col
-		tmoveto(0, term.c.y + arg[0]);
-		break;
 	case 'F': // CPL -- Cursor <n> Up and first col
-		tmoveto(0, term.c.y - arg[0]);
+		tmoveto(0, term.c.y + arg[0]);
 		break;
 	case 'G': // CHA -- Move to <col>
 	case '`': // HPA -- Move to <col>
@@ -1011,28 +1016,16 @@ static void csihandle(char command, int *arg, u32 nargs)
 		tmoveto(arg[1] - 1, arg[0] - 1);
 		break;
 	case 'I': // CHT -- Cursor Forward Tabulation <n> tab stops
+	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
 		tputtab(arg[0]);
 		break;
 	case 'J': // ED -- Clear screen
-		switch (arg[0]) {
-		case 0: // below
-			tclearregion(term.c.x, term.c.y, term.col - 1, term.c.y);
-			tclearregion(0, term.c.y + 1, term.col - 1, term.row - 1);
-			break;
-		case 1: // above
-			tclearregion(0, 0, term.col - 1, term.c.y - 1);
-			tclearregion(0, term.c.y, term.c.x, term.c.y);
-			break;
-		case 2: // all
-			tclearregion(0, 0, term.col - 1, term.row - 1);
-			break;
-		default:
-			goto unknown;
-		}
-		break;
 	case 'K': // EL -- Clear line
-		tclearregion(arg[0] ? 0 : term.c.x, term.c.y,
-			arg[0] == 1 ? term.c.x : term.col - 1, term.c.y);
+		tclearregion(
+			arg[0] ? 0 : term.c.x,
+			arg[0] && command == 'J' ? 0 : term.c.y,
+			arg[0] == 1 ? term.c.x : term.col - 1,
+			arg[0] == 1 || command == 'K' ? term.c.y : term.row - 1);
 		break;
 	case 'L': // IL -- Insert <n> blank lines
 		if (!BETWEEN(term.c.y, term.top, term.bot))
@@ -1052,16 +1045,11 @@ static void csihandle(char command, int *arg, u32 nargs)
 		tdeletechar(arg[0]);
 		break;
 	case 'S': // SU -- Scroll <n> line up
-		tscroll(-arg[0]);
-		break;
 	case 'T': // SD -- Scroll <n> line down
 		tscroll(arg[0]);
 		break;
 	case 'X': // ECH -- Erase <n> char
 		tclearregion(term.c.x, term.c.y, term.c.x + arg[0] - 1, term.c.y);
-		break;
-	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
-		tputtab(-arg[0]);
 		break;
 	case 'c': // DA -- Device Attributes
 		if (arg[0] == 0)
