@@ -1,3 +1,2 @@
-* Refactor mousereport, tdeletechar, tinstertblank, tclearregion
-* Inline internal shortcuts
+* Refactor tdeletechar, tinstertblank
 * Selecting inside Vim doesn’t work

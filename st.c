@@ -71,11 +71,8 @@ typedef enum {
 
 typedef enum {
 	MOUSE_NONE,
-	MOUSE_X10 = 9,
-	MOUSE_BTN = 1000,
-	MOUSE_MOTION = 1002,
-	MOUSE_MANY = 1003,
-	MOUSE_SGR = 1006,
+	MOUSE_BUTTON = 1000,
+	MOUSE_MOTION = 1003,
 } mouse_mode;
 
 typedef enum {
@@ -126,13 +123,6 @@ typedef struct {
 	int y;
 } Point;
 
-typedef struct {
-	u32 mod;
-	u32: 32;
-	KeySym keysym;
-	void (*func)();
-} Shortcut;
-
 // ESC '[' [[ [<priv>] <arg> [;]] <mode> [<mode>]]
 static struct {
 	int arg[16];
@@ -164,23 +154,6 @@ static struct {
 	Point nb; // normalized coordinates of the beginning of the selection
 	Point ne; // normalized coordinates of the end of the selection
 } sel;
-
-// Function definitions used by X event handlers
-static void clipcopy(void);
-static void clippaste(void);
-static void selpaste(void);
-static void scrolldown(void);
-static void scrollup(void);
-
-// Internal keyboard shortcuts.
-static Shortcut shortcuts[] = {
-	// mask                   keysym         function
-	{ ShiftMask,              XK_Insert,     selpaste   },
-	{ ShiftMask,              XK_Page_Up,    scrollup   },
-	{ ShiftMask,              XK_Page_Down,  scrolldown },
-	{ ControlMask|ShiftMask,  XK_C,          clipcopy   },
-	{ ControlMask|ShiftMask,  XK_V,          clippaste  },
-};
 
 // Escape sequences emitted when pressing special keys.
 static Key key[] = {
@@ -516,72 +489,33 @@ static void xsel(char* opts, bool copy)
 	fclose(pipe);
 }
 
-static void selcopy()   { xsel("xsel -pi", true); }
-static void clipcopy()  { xsel("xsel -bi", true); }
-static void selpaste()  { xsel("xsel -po", false);  }
-static void clippaste() { xsel("xsel -bo", false); }
-
 static void mousereport(XButtonEvent *e)
 {
-	static int oldbutton = 3; // on startup: 3 = release
 	static int ox, oy;
 
 	Point point = ev2point(e);
 	int x = point.x, y = point.y - term.scroll;
-	int button = e->button, state = e->state;
-	int len;
+	int button = e->button;
 	char buf[40];
 
-	/* from urxvt */
-	if (e->type == MotionNotify) {
-		if (x == ox && y == oy)
-			return;
-		if (term.mouse != MOUSE_MOTION && term.mouse != MOUSE_MANY)
-			return;
-		/* MOUSE_MOTION: no reporting if no button is pressed */
-		if (term.mouse == MOUSE_MOTION && oldbutton == 3)
-			return;
-
-		button = oldbutton + 32;
-		ox = x;
-		oy = y;
-	} else {
-		if (term.mouse != MOUSE_SGR && e->type == ButtonRelease) {
-			button = 3;
-		} else {
-			button -= Button1;
-			if (button >= 3)
-				button += 64 - 3;
-		}
-		if (e->type == ButtonPress) {
-			oldbutton = button;
-			ox = x;
-			oy = y;
-		} else if (e->type == ButtonRelease) {
-			oldbutton = 3;
-			/* MOUSE_X10: no button release reporting */
-			if (term.mouse == MOUSE_X10 || button == 64 || button == 65)
-				return;
-		}
-	}
-
-	if (term.mouse != MOUSE_X10) {
-		button += ((state & ShiftMask  ) ? 4  : 0)
-			+ ((state & Mod4Mask   ) ? 8  : 0)
-			+ ((state & ControlMask) ? 16 : 0);
-	}
-
-	if (term.mouse == MOUSE_SGR) {
-		len = snprintf(buf, sizeof(buf), "\033[<%d;%d;%d%c",
-				button, x + 1, y + 1,
-				e->type == ButtonRelease ? 'm' : 'M');
-	} else if (x < 223 && y < 223) {
-		len = snprintf(buf, sizeof(buf), "\033[M%c%c%c",
-				32 + button, 32 + x + 1, 32 + y + 1);
-	} else {
+	if (x > 222 || y > 222)
 		return;
+
+	if (e->type == MotionNotify) {
+		if (term.mouse != MOUSE_MOTION || (x == ox && y == oy))
+			return;
+	} else {
+		button = e->type == ButtonRelease ? 3 : button - Button1;
 	}
 
+	ox = x;
+	oy = y;
+
+	button += ((e->state & ShiftMask  ) ? 4  : 0)
+		+ ((e->state & Mod4Mask   ) ? 8  : 0)
+		+ ((e->state & ControlMask) ? 16 : 0);
+
+	int len = snprintf(buf, sizeof(buf), "\033[M%c%c%c", 32 + button, 33 + x, 33 + y);
 	ttywrite(buf, len);
 }
 
@@ -728,14 +662,18 @@ static void kpress(XEvent *e)
 	KeySym ksym;
 	int len = XLookupString(ev, buf, LEN(buf) - 1, &ksym, NULL);
 
-	for (Shortcut *bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
-		if (bp->keysym == ksym && !(bp->mod & ~ev->state)) {
-			bp->func();
-			return;
-		}
-	}
-
-	if (len && *buf != '\b' && *buf != '\x7F') {
+	// Internal shortcuts
+	if (ksym == XK_Insert && (ev->state & ShiftMask))
+		xsel("xsel -po", false);
+	else if (ksym == XK_Prior && (ev->state & ShiftMask))
+		tscroll(4 - term.row);
+	else if (ksym == XK_Next && (ev->state & ShiftMask))
+		tscroll(term.row - 4);
+	else if (ksym == XK_C && !((ControlMask | ShiftMask) & ~ev->state))
+		xsel("xsel -bi", true);
+	else if (ksym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
+		xsel("xsel -bo", false);
+	else if (len && *buf != '\b' && *buf != '\x7F') {
 		ttywrite(buf, len);
 	} else {
 		char *customkey = kmap(ksym, ev->state);
@@ -823,9 +761,9 @@ static void brelease(XEvent *e)
 	if (term.mouse && !(ev->state & ShiftMask))
 		mousereport(ev);
 	else if (ev->button == Button2)
-		selpaste();
+		xsel("xsel -po", false);
 	else if (ev->button == Button1 || ev->button == Button3)
-		selcopy();
+		xsel("xsel -pi", true);
 }
 
 static void selclear(__attribute__((unused)) XEvent *e)
@@ -954,11 +892,8 @@ static void tsetmode(bool set, int arg)
 		if (set)
 			tclearregion(0, 0, term.col - 1, term.row - 1);
 		break;
-	case MOUSE_X10:
-	case MOUSE_BTN:
+	case MOUSE_BUTTON:
 	case MOUSE_MOTION:
-	case MOUSE_MANY:
-	case MOUSE_SGR:
 		xw.attrs.event_mask &= ~PointerMotionMask;
 		xw.attrs.event_mask |= set * PointerMotionMask;
 		XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &xw.attrs);
@@ -1260,9 +1195,6 @@ static size_t ttyread(void)
 
 	return buf_len;
 }
-
-static void scrolldown(void) { tscroll(term.row - 2); }
-static void scrollup(void) { tscroll(2 - term.row); }
 
 static void __attribute__((noreturn)) run(void)
 {
