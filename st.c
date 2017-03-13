@@ -45,21 +45,22 @@
 #define MAX(a, b)		((a) < (b) ? (b) : (a))
 #define LEN(a)			(sizeof(a) / sizeof(a)[0])
 #define BETWEEN(x, a, b)	((a) <= (x) && (x) <= (b))
-#define ISCONTROL(c)		((c) < 0x20 || BETWEEN((c), 0x7f, 0x9f))
+#define ISCONTROL(c)		((c) < 0x20 || (c) == 0x7f)
 #define ISDELIM(u)		(strchr(" <>'`\"(){}", u) != NULL)
 #define LIMIT(x, a, b)		((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
-#define ATTRCMP(a, b)		((a).mode != (b).mode || (a).fg != (b).fg || (a).bg != (b).bg)
 #define TIMEDIFF(t1, t2)	((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define SWAP(a, b)		do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define TLINE(y)		(term.hist[term.alt ? HIST_SIZE + ((y) + term.scroll) % 64 : ((y) + term.scroll) % HIST_SIZE])
 #define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define ERRESC(...)		die("erresc: " __VA_ARGS__)
+#define ATTRCMP(a, b)		((a).mode != (b).mode || (a).fg != (b).fg || (a).bg != (b).bg)
+#define UTF_LEN(u)		((u) < 192 ? 1 : (u) < 224 ? 2 : u < 240 ? 3 : 4)
 
 typedef enum {
 	ATTR_BOLD       = 1 << 0,
-	ATTR_FAINT      = 1 << 1,
-	ATTR_ITALIC     = 1 << 2,
+	ATTR_ITALIC     = 1 << 1,
+	ATTR_FAINT      = 1 << 2,
 	ATTR_UNDERLINE  = 1 << 3,
 	ATTR_REVERSE    = 1 << 4,
 	ATTR_INVISIBLE  = 1 << 5,
@@ -108,10 +109,10 @@ typedef uint32_t Rune;
 typedef XftColor Color;
 
 typedef struct {
-	Rune u;         // character code
-	uint16_t mode;  // attribute flags
-	uint8_t fg;     // foreground
-	uint8_t bg;     // background
+	u8 u[4];   // bytes
+	u16 mode;  // attribute flags
+	u8 fg;     // foreground
+	u8 bg;     // background
 } Glyph;
 
 typedef struct {
@@ -215,7 +216,6 @@ static struct {
 	int row;                               // row count
 	int col;                               // column count
 	Glyph hist[HIST_SIZE + 64][LINE_SIZE]; // history buffer
-	XftGlyphFontSpec specbuf[LINE_SIZE];   // font spec buffer used for rendering
 	TCursor c;                             // cursor
 	int scroll;                            // current scroll position
 	int top;                               // top scroll limit
@@ -249,7 +249,7 @@ static Point ev2point(XButtonEvent *e)
 static void selsnap(int *x, int y, int direction)
 {
 	if (sel.snap == SNAP_WORD) {
-		while (BETWEEN(*x, 0, term.col - 1) && !ISDELIM(TLINE(y)[*x].u))
+		while (BETWEEN(*x, 0, term.col - 1) && !ISDELIM(TLINE(y)[*x].u[0]))
 			*x += direction;
 		*x -= direction;
 	} else if (sel.snap == SNAP_LINE) {
@@ -373,136 +373,93 @@ static void xinit(void)
 	XStoreName(xw.dpy, xw.win, "st");
 }
 
-static int xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x, int y)
+static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 {
-	float winx = borderpx + x * xw.cw, winy = borderpx + y * xw.ch, xp, yp;
-	uint32_t mode, prevmode = USHRT_MAX;
-	XftFont *font = dc.font;
-	float runewidth = xw.cw;
-	Rune rune;
-	FT_UInt glyphidx;
-	int i, numspecs = 0;
-
-	for (i = 0, xp = winx, yp = winy + font->ascent; i < len; ++i) {
-		/* Fetch rune and mode for current glyph. */
-		rune = glyphs[i].u;
-		mode = glyphs[i].mode;
-
-		/* Determine font for glyph if different from previous glyph. */
-		if (prevmode != mode) {
-			prevmode = mode;
-			font = dc.font;
-			runewidth = xw.cw * 1.0f;
-			if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD))
-				font = dc.ibfont;
-			else if (mode & ATTR_ITALIC)
-				font = dc.ifont;
-			else if (mode & ATTR_BOLD)
-				font = dc.bfont;
-			yp = winy + font->ascent;
-		}
-
-		/* Lookup character index with default font. */
-		glyphidx = XftCharIndex(xw.dpy, font, rune);
-		if (!glyphidx)
-			continue;
-
-		specs[numspecs].font = font;
-		specs[numspecs].glyph = glyphidx;
-		specs[numspecs].x = (short) xp;
-		specs[numspecs].y = (short) yp;
-		xp += runewidth;
-		numspecs++;
-	}
-
-	return numspecs;
-}
-
-static void xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, int y)
-{
-	int winx = borderpx + x * xw.cw, winy = borderpx + y * xw.ch, width = len * xw.cw;
 	Color *fg, *bg;
-	XRectangle r = { 0, 0, (u16) width, (u16) xw.ch };
 
-	fg = &dc.col[base.fg];
-	bg = &dc.col[base.bg];
+	// Determine font for glyph
+	XftFont *font = (XftFont*[]) { dc.font, dc.bfont, dc.ifont, dc.ibfont } [glyph.mode & (ATTR_BOLD | ATTR_ITALIC)];
 
-	if (base.mode & ATTR_REVERSE)
+	int y = winy + font->ascent;
+	int width = xw.cw * len;
+	// XRectangle r = { 0, 0, (u16) width, (u16) xw.ch };
+
+	fg = &dc.col[glyph.fg];
+	bg = &dc.col[glyph.bg];
+
+	if (glyph.mode & ATTR_REVERSE)
 		SWAP(fg, bg);
 
-	if (base.mode & ATTR_INVISIBLE)
+	if (glyph.mode & ATTR_INVISIBLE)
 		fg = bg;
 
 	// Render the background
-	XftDrawRect(xw.draw, bg, winx, winy, width, xw.ch);
+	XftDrawRect(xw.draw, bg, x, winy, width, xw.ch);
 
 	// Set the clip region because Xft is sometimes dirty
-	XftDrawSetClipRectangles(xw.draw, winx, winy, &r, 1);
+	// XftDrawSetClipRectangles(xw.draw, x, winy, &r, 1);
 
 	// Render the glyphs
-	XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
+	XftDrawStringUtf8(xw.draw, fg, font, x, y, buf, len);
 
 	// Render bars
-	if (base.mode & ATTR_UNDERLINE)
-		XftDrawRect(xw.draw, fg, winx, winy + dc.font->ascent + 1, width, 1);
+	if (glyph.mode & ATTR_UNDERLINE)
+		XftDrawRect(xw.draw, fg, x, y + 1, xw.cw, 1);
 
-	if (base.mode & ATTR_STRUCK)
-		XftDrawRect(xw.draw, fg, winx, winy + 2 * dc.font->ascent / 3, width, 1);
+	if (glyph.mode & ATTR_STRUCK)
+		XftDrawRect(xw.draw, fg, x, (y + 2 * winy) / 3, xw.cw, 1);
 
-	if (base.mode & ATTR_BAR)
-		XftDrawRect(xw.draw, fg, winx + 2, winy, 2, xw.ch);
+	if (glyph.mode & ATTR_BAR)
+		XftDrawRect(xw.draw, fg, x + 2, winy, 2, xw.ch);
 
 	// Reset clip to none
-	XftDrawSetClip(xw.draw, 0);
+	// XftDrawSetClip(xw.draw, 0);
 }
 
-static void drawregion(int x1, int y1, int x2, int y2)
+static void xdrawglyph(int x, int y)
 {
-	int i, x, y, ox, numspecs;
-	Glyph base, new;
-	XftGlyphFontSpec *specs;
-	bool draw_sel = sel.alt == term.alt;
+	static u8 buf[4 * LINE_SIZE];
+	static int len;
+	static Glyph prev;
+	static int old_x, old_y;
+
+	Glyph glyph = TLINE(y)[x];
+
+	// Draw selection and cursor
 	int cursor = term.hide || term.scroll != term.lines ? 0 :
 		xw.focused && xw.cursor < 3 ? ATTR_REVERSE :
 		xw.cursor < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 
+	if (sel.alt == term.alt && selected(x, y + term.scroll))
+		glyph.mode ^= ATTR_REVERSE;
+	if (x == term.c.x && y == term.c.y)
+		glyph.mode ^= cursor;
+
+	if (ATTRCMP(glyph, prev) || x == 0) {
+		short xp = (short) (borderpx + old_x * xw.cw);
+		short yp = (short) (borderpx + old_y * xw.ch);
+		xdrawglyphfontspec(prev, buf, len, xp, yp);
+		len = 0;
+		old_x = x;
+		old_y = y;
+		prev = glyph;
+	}
+
+	for (int i = 0; i < UTF_LEN(*glyph.u); ++i)
+		buf[len++] = glyph.u[i];
+}
+
+static void draw(void)
+{
 	if (!xw.visible)
 		return;
 
 	XftDrawRect(xw.draw, &dc.col[defaultbg], 0, 0, xw.w, xw.h);
 
-	for (y = y1; y < y2; y++) {
-		specs = term.specbuf;
-		numspecs = xmakeglyphfontspecs(specs, &TLINE(y)[x1], x2 - x1, x1, y);
-		i = ox = 0;
-		base = TLINE(y)[x1];
+	for (int y = 0; y < term.row; ++y)
+		for (int x = 0; x < term.col; ++x)
+			xdrawglyph(x, y);
 
-		for (x = x1; x < x2 && i < numspecs; x++) {
-			new = TLINE(y)[x];
-			if (draw_sel && selected(x, y + term.scroll))
-				new.mode ^= ATTR_REVERSE;
-			if (x == term.c.x && y == term.c.y)
-				new.mode ^= cursor;
-			if (i > 0 && ATTRCMP(base, new)) {
-				xdrawglyphfontspecs(specs, base, i, ox, y);
-				specs += i;
-				numspecs -= i;
-				i = 0;
-			}
-			if (i == 0) {
-				ox = x;
-				base = new;
-			}
-			i++;
-		}
-		if (i > 0)
-			xdrawglyphfontspecs(specs, base, i, ox, y);
-	}
-}
-
-static void draw(void)
-{
-	drawregion(0, 0, term.col, term.row);
 	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, xw.w, xw.h, 0, 0);
 	XSetForeground(xw.dpy, dc.gc, dc.col[defaultbg].pixel);
 }
@@ -539,7 +496,7 @@ static void tclearregion(int x1, int y1, int x2, int y2)
 			gp->fg = term.c.attr.fg;
 			gp->bg = term.c.attr.bg;
 			gp->mode = 0;
-			gp->u = ' ';
+			gp->u[0] = ' ';
 		}
 	}
 }
@@ -559,46 +516,20 @@ static int tlinelen(int y)
 	if (TLINE(y)[i - 1].mode & ATTR_WRAP)
 		return i;
 
-	while (i > 0 && TLINE(y)[i - 1].u == ' ')
+	while (i > 0 && TLINE(y)[i - 1].u[0] == ' ')
 		--i;
 
 	return i;
 }
 
-static char* utf8encode(Rune u, char *p)
-{
-	if (u < 0x80) {
-		*p++ = (char) u;
-		return p;
-	}
-
-	if (u < 0x800) {
-		*p++ = (char) (0xC0 | u >> 6);
-	} else if (u < 0x10000) {
-		*p++ = (char) (0xE0 | u >> 12);
-		*p++ = (char) (0x80 | ((u >> 6) & 0x3F));
-	} else {
-		*p++ = (char) (0xF0 | u >> 18);
-		*p++ = (char) (0x80 | ((u >> 12) & 0x3F));
-		*p++ = (char) (0x80 | ((u >>  6) & 0x3F));
-	}
-
-	*p++ = (char) (0x80 | (u & 0x3F));
-	return p;
-}
-
 // append every set & selected glyph to the selection
 static void getsel(FILE* pipe)
 {
-	char *str, *ptr;
-	int y, bufsize, lastx, linelen;
-
-	bufsize = (term.col + 1) * (sel.ne.y - sel.nb.y + 1) * 4;
-	ptr = str = malloc(bufsize);
+	int y, lastx, linelen;
 
 	for (y = sel.nb.y; y <= sel.ne.y; y++) {
 		if ((linelen = tlinelen(y)) == 0) {
-			*ptr++ = '\n';
+			fprintf(pipe, "\n");
 			continue;
 		}
 
@@ -606,18 +537,15 @@ static void getsel(FILE* pipe)
 
 		lastx = (sel.ne.y == y) ? sel.ne.x : term.col-1;
 		Glyph *last = &line[MIN(lastx, linelen - 1)];
-		while (last->u == ' ')
+		while (last->u[0] == ' ')
 			--last;
 
 		for (Glyph *gp = &line[sel.nb.y == y ? sel.nb.x : 0]; gp <= last; ++gp)
-			ptr = utf8encode(gp->u, ptr);
+			fprintf(pipe, "%.4s", gp->u);
 
 		if ((y < sel.ne.y || lastx >= linelen) && !(last->mode & ATTR_WRAP))
-			*ptr++ = '\n';
+			fprintf(pipe, "\n");
 	}
-
-	if (!fwrite(str, 1, ptr - str, pipe))
-		die("error copying sel: %s", strerror(errno));
 }
 
 static void xsel(char* opts, bool copy)
@@ -784,21 +712,6 @@ static void tsetscroll(int a, int b)
 	LIMIT(b, 0, term.row - 1);
 	term.top = MIN(a, b);
 	term.bot = MAX(a, b);
-}
-
-static void tsetchar(Glyph *glyph, int x, int y)
-{
-	static int vt100_0[] = {
-		0x256c, 0x2592, 0, 0, 0, 0, 0xb0, 0xb1,            // ` - g
-		0, 0, 0x2518, 0x2510, 0x250c, 0x2514, 0x253c, 0,   // h - o
-		0, 0x2500, 0, 0, 0x251c, 0x2524, 0x2534, 0x252c,   // p - w
-		0x2502, 0x2264, 0x2265, 0x3c0, 0x2260, 0xa3, 0xb7, // x - ~
-	};
-
-	if (term.charset && BETWEEN(glyph->u, '`', '~'))
-		glyph->u = vt100_0[glyph->u - '`'];
-
-	TLINE(y)[x] = *glyph;
 }
 
 static void tnewline(bool first_col)
@@ -1348,7 +1261,7 @@ static void tcontrolcode(u8 ascii)
 	}
 }
 
-static void tputc(Rune u)
+static void tputc(u8 u)
 {
 	// Actions of control codes must be performed as soon they arrive
 	// because they can be embedded inside a control sequence, and
@@ -1386,30 +1299,32 @@ static void tputc(Rune u)
 	if (term.c.x >= term.col)
 		tnewline(true);
 
-	term.c.attr.u = u;
-	tsetchar(&term.c.attr, term.c.x, term.c.y);
+	// TODO graphic chars
+	// static int vt100_0[] = {
+		// 0x256c, 0x2592, 0, 0, 0, 0, 0xb0, 0xb1,            // ` - g
+		// 0, 0, 0x2518, 0x2510, 0x250c, 0x2514, 0x253c, 0,   // h - o
+		// 0, 0x2500, 0, 0, 0x251c, 0x2524, 0x2534, 0x252c,   // p - w
+		// 0x2502, 0x2264, 0x2265, 0x3c0, 0x2260, 0xa3, 0xb7, // x - ~
+	// };
+
+	// if (term.charset && BETWEEN(glyph->u[-1], '`', '~'))
+		// glyph->u = vt100_0[glyph->u[0] - '`'];
+
+
+	static int i;
+	if (i == 0)
+		TLINE(term.c.y)[term.c.x] = term.c.attr;
+	TLINE(term.c.y)[term.c.x].u[i++] = u;
+	u8 tmp = TLINE(term.c.y)[term.c.x].u[0];
+	if (i < UTF_LEN(tmp))
+		return;
+	i = 0;
 
 	if (term.c.x + 1 < term.col) {
 		tmoveto(term.c.x + 1, term.c.y);
 	} else {
 		TLINE(term.c.y)[term.c.x].mode |= ATTR_WRAP;
 		tnewline(true);
-	}
-}
-
-static void utf8decode(u8 c) {
-	static Rune rune = 0;
-	static int utf_len = 0;
-
-	if (c < 0x80) {
-		tputc(c);
-	} else if (c < 0xC0) {
-		rune = (rune << 6) | (c & 0x3F);
-		if (--utf_len <= 0)
-			tputc(rune);
-	} else {
-		utf_len = (c >> 4) & 3;
-		rune = c & (0x3F >> utf_len);
 	}
 }
 
@@ -1426,7 +1341,7 @@ static size_t ttyread(void)
 		term.scroll = term.lines;
 
 	for (char *ptr = buf; ptr < buf + buf_len; ++ptr)
-		utf8decode(*ptr);
+		tputc(*ptr);
 
 	return buf_len;
 }
@@ -1466,6 +1381,7 @@ static void __attribute__((noreturn)) run(void)
 		}
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
+
 		if (dirty && TIMEDIFF(now, last) > 1000 / FPS) {
 			draw();
 			XFlush(xw.dpy);
