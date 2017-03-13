@@ -6,7 +6,6 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
-#include <X11/extensions/Xrender.h>
 #include <X11/keysym.h>
 #include <assert.h>
 #include <errno.h>
@@ -51,7 +50,6 @@
 #define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define ERRESC(...)		die("erresc: " __VA_ARGS__)
-#define UTF_LEN(u)		((u) < 192 ? 1 : (u) < 224 ? 2 : u < 240 ? 3 : 4)
 
 typedef enum {
 	ATTR_BOLD       = 1 << 0,
@@ -155,6 +153,29 @@ static struct {
 	Point ne; // normalized coordinates of the end of the selection
 } sel;
 
+// Terminal state
+static struct {
+	int row;                               // row count
+	int col;                               // column count
+	Glyph hist[HIST_SIZE + 64][LINE_SIZE]; // history buffer
+	TCursor c;                             // cursor
+	TCursor saved_c[2];                    // saved cursors
+	int scroll;                            // current scroll position
+	int top;                               // top scroll limit
+	int bot;                               // bottom scroll limit
+	mouse_mode mouse;                      // terminal mode flags
+	escape_state esc;                      // escape state flags
+	int lines;
+	bool alt, hide, focus, charset, bracket_paste;
+} term;
+
+// Drawing Context
+static struct {
+	Color col[256];
+	XftFont *font[4];
+	GC gc;
+} dc;
+
 // Escape sequences emitted when pressing special keys.
 static Key key[] = {
 	// keysym           mask          string
@@ -177,28 +198,6 @@ static Key key[] = {
 	{ XK_Prior,         0,            "\033[5~"   },
 	{ XK_Next,          0,            "\033[6~"   },
 };
-
-// Terminal state
-static struct {
-	int row;                               // row count
-	int col;                               // column count
-	Glyph hist[HIST_SIZE + 64][LINE_SIZE]; // history buffer
-	TCursor c;                             // cursor
-	int scroll;                            // current scroll position
-	int top;                               // top scroll limit
-	int bot;                               // bottom scroll limit
-	mouse_mode mouse;                      // terminal mode flags
-	escape_state esc;                      // escape state flags
-	int lines;
-	bool alt, hide, focus, charset, wrap, bracket_paste;
-} term;
-
-// Drawing Context
-static struct {
-	Color col[256];
-	XftFont *font[4];
-	GC gc;
-} dc;
 
 static int ttyfd;
 static char **opt_cmd = (char*[]) { shell, NULL };
@@ -240,31 +239,10 @@ static bool selected(int x, int y)
 		&& (y != sel.ne.y || x <= sel.ne.x);
 }
 
-static void xloadfont(XftFont **f, FcPattern *pattern)
-{
-	FcPattern *match;
-	FcResult result;
-	XGlyphInfo extents;
-
-	match = XftFontMatch(xw.dpy, xw.scr, pattern, &result);
-	if (!match)
-		die("st: can't open font\n");
-
-	if (!(*f = XftFontOpenPattern(xw.dpy, match))) {
-		FcPatternDestroy(match);
-		die("st: can't open font\n");
-	}
-
-	XftTextExtentsUtf8(xw.dpy, *f, (const FcChar8 *) "Q", 1, &extents);
-
-	// Setting character width and height.
-	xw.cw = extents.xOff;
-	xw.ch = (*f)->ascent + (*f)->descent;
-}
-
 static void xloadfonts(char *fontstr)
 {
 	FcPattern *pattern = FcNameParse((FcChar8 *) fontstr);
+	FcResult result;
 
 	if (!pattern)
 		die("st: can't open font %s\n", fontstr);
@@ -276,9 +254,13 @@ static void xloadfonts(char *fontstr)
 		FcPatternDel(pattern, FC_WEIGHT);
 		FcPatternAddInteger(pattern, FC_SLANT, i & ATTR_ITALIC ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
 		FcPatternAddInteger(pattern, FC_WEIGHT, i & ATTR_BOLD ? FC_WEIGHT_BOLD : FC_WEIGHT_NORMAL);
-		xloadfont(&dc.font[i], pattern);
+		FcPattern *match = XftFontMatch(xw.dpy, xw.scr, pattern, &result);
+		dc.font[i] = XftFontOpenPattern(xw.dpy, match);
+		FcPatternDestroy(match);
 	}
 
+	xw.cw = dc.font[0]->max_advance_width;
+	xw.ch = dc.font[0]->height;
 	FcPatternDestroy(pattern);
 }
 
@@ -394,7 +376,8 @@ static void xdrawglyph(int x, int y)
 		prev = glyph;
 	}
 
-	for (int i = 0; i < UTF_LEN(*glyph.u); ++i)
+	int utf_len = *glyph.u < 192 ? 1 : *glyph.u < 224 ? 2 : *glyph.u < 240 ? 3 : 4;
+	for (int i = 0; i < utf_len; ++i)
 		buf[len++] = MAX(glyph.u[i], ' ');
 }
 
@@ -568,16 +551,6 @@ static void tputtab(int n)
 	term.c.x += n << 3;
 }
 
-static void tcursor(int mode)
-{
-	static TCursor c[2];
-
-	if (mode == CURSOR_SAVE)
-		c[term.alt] = term.c;
-	else if (mode == CURSOR_LOAD)
-		term.c = c[term.alt];
-}
-
 static void tmoveto(int x, int y)
 {
 	term.c.x = LIMIT(x, 0, term.col - 1);
@@ -588,11 +561,11 @@ static void tswapscreen(void)
 {
 	static int scroll_save = 0;
 
-	tcursor(CURSOR_SAVE);
+	term.saved_c[term.alt] = term.c;
 	term.alt = !term.alt;
 	SWAP(scroll_save, term.lines);
 	term.scroll = term.lines;
-	tcursor(CURSOR_LOAD);
+	term.c = term.saved_c[term.alt];
 }
 
 static void tsetscroll(int a, int b)
@@ -616,20 +589,6 @@ static void tnewline(bool first_col)
 	}
 	if (first_col)
 		term.c.x = 0;
-}
-
-static void treset(bool hard_reset)
-{
-	term.c = (TCursor) {{ .fg = 0, .bg = 0 }, .x = 0, .y = 0 };
-	tsetscroll(0, term.row - 1);
-	term.alt = term.hide = term.focus = term.charset = term.bracket_paste = false;
-	term.wrap = true;
-
-	for (int i = 0; i < (hard_reset ? 2 : 0); i++) {
-		tmoveto(0, 0);
-		tswapscreen();
-		tclearregion(0, 0, term.col - 1, term.row - 1);
-	}
 }
 
 static void resize(int width, int height)
@@ -877,9 +836,7 @@ static void tsetmode(bool set, int arg)
 {
 	switch (arg) {
 	case 1: // DECCKM -- Cursor key (ignored)
-		break;
-	case 7: // DECAWM -- Auto wrap
-		term.wrap = set;
+	case 7: // DECAWM -- Auto wrap (ignored)
 		break;
 	case 12: // SRM -- Send/receive (TODO)
 		break;
@@ -1018,7 +975,8 @@ static void csihandle(char command, int *arg, u32 nargs)
 		ttywrite(buf, len);
 		break;
 	case 'p': // DECSTR -- Soft terminal reset
-		treset(false);
+		memset(&term.c, 0, sizeof(term.c));
+		term.alt = term.hide = term.focus = term.charset = term.bracket_paste = false;
 		break;
 	case 'q': // DECSCUSR -- Set Cursor Style
 		if (!BETWEEN(arg[0], 0, 6))
@@ -1030,8 +988,10 @@ static void csihandle(char command, int *arg, u32 nargs)
 		tmoveto(0, 0);
 		break;
 	case 's': // DECSC -- Save cursor position
+		term.saved_c[term.alt] = term.c;
+		break;
 	case 'u': // DECRC -- Restore cursor position
-		tcursor(command == 'u' ? CURSOR_LOAD : CURSOR_SAVE);
+		term.c = term.saved_c[term.alt];
 		break;
 	default:
 	unknown:
@@ -1076,11 +1036,14 @@ static escape_state eschandle(u8 ascii)
 		ttywrite(vtiden, sizeof(vtiden) - 1);
 		return ESC_NONE;
 	case 'c': // RIS -- Reset to inital state
-		treset(true);
+		memset(&term, 0, sizeof(term));
+		resize(xw.w, xw.h);
 		return ESC_NONE;
 	case '7': // DECSC -- Save Cursor
+		term.saved_c[term.alt] = term.c;
+		return ESC_NONE;
 	case '8': // DECRC -- Restore Cursor
-		tcursor(ascii == '8' ? CURSOR_LOAD : CURSOR_SAVE);
+		term.c = term.saved_c[term.alt];
 		return ESC_NONE;
 	default:
 		return ESC_NONE;
@@ -1260,7 +1223,6 @@ int main(int argc, char *argv[])
 	term.row = 24;
 	term.col = 80;
 	setlocale(LC_CTYPE, "");
-	treset(true);
 	xinit();
 	ttynew();
 	run();
