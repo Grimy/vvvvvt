@@ -22,10 +22,18 @@ st: st.c colors.c config.h Makefile
 	@echo CC $@
 	@$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
 
+st-fuzz: st.c colors.c config.h Makefile
+	@echo CC $@
+	afl-clang $(CFLAGS) $(LDFLAGS) $< -o $@
+
 colors.c: husl.pl
 	./$^ > $@
 
-.PHONY: report
+fuzz: st-fuzz
+	afl-fuzz -iinput -ooutput -m99M ./$^ cat @@
+
 report: st
 	time perf record ./st perl -E 'say "a‽béc*" x 4e7'
 	perf report
+
+.PHONY: report fuzz

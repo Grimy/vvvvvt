@@ -30,13 +30,14 @@
 #define LEN(a)			(sizeof(a) / sizeof(a)[0])
 #define BETWEEN(x, a, b)	((a) <= (x) && (x) <= (b))
 #define ISCONTROL(c)		((c) < 0x20 || (c) == 0x7f)
-#define ISDELIM(u)		(strchr(" <>'`\"(){}", u) != NULL)
 #define LIMIT(x, a, b)		((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
-#define TIMEDIFF(t1, t2)	((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define SWAP(a, b)		do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define TLINE(y)		(term.hist[term.alt ? HIST_SIZE + (y) % 64 : ((y) + term.scroll) % HIST_SIZE])
-#define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
+
+#define ISDELIM(u)		(strchr(" <>'`\"(){}", u) != NULL)
+#define TIMEDIFF(t1, t2)	((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
+#define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 
 typedef enum {
 	ATTR_BOLD       = 1 << 0,
@@ -115,23 +116,6 @@ static struct {
 	u32 nargs;
 } csi;
 
-// Graphical info
-static struct {
-	Display *dpy;
-	Window win;
-	Drawable buf;
-	Atom wmdeletewin;
-	XftDraw *draw;
-	Visual *vis;
-	XSetWindowAttributes attrs;
-	int scr;
-	int w, h;     // window width and height
-	int ch, cw;   // character width and height
-	bool visible;
-	bool focused;
-	int cursor;   // cursor style
-} xw;
-
 static struct {
 	bool alt;
 	int snap;
@@ -154,8 +138,29 @@ static struct {
 	mouse_mode mouse;                      // terminal mode flags
 	escape_state esc;                      // escape state flags
 	int lines;
+	int cursor;                            // cursor style
 	bool alt, hide, focus, charset, bracket_paste;
 } term;
+
+static int ttyfd;
+static char **opt_cmd = (char*[]) { SHELL, NULL };
+
+// Graphical info
+static struct {
+	Display *dpy;
+	Window win;
+	Drawable buf;
+	Atom wmdeletewin;
+	XftDraw *draw;
+	Visual *vis;
+	XSetWindowAttributes attrs;
+	int scr;
+	int w, h;     // window width and height
+	int ch, cw;   // character width and height
+	bool visible;
+	bool focused;
+	int padding;
+} xw;
 
 // Drawing Context
 static struct {
@@ -187,8 +192,6 @@ static Key key[] = {
 	{ XK_Next,          0,            "\033[6~"   },
 };
 
-static int ttyfd;
-static char **opt_cmd = (char*[]) { SHELL, NULL };
 static void (*handler[LASTEvent])(XEvent *);
 
 static Point ev2point(XButtonEvent *e)
@@ -345,8 +348,8 @@ static void xdrawglyph(int x, int y)
 
 	// Draw selection and cursor
 	int cursor = term.hide || term.scroll != term.lines ? 0 :
-		xw.focused && xw.cursor < 3 ? ATTR_REVERSE :
-		xw.cursor < 5 ? ATTR_UNDERLINE : ATTR_BAR;
+		xw.focused && term.cursor < 3 ? ATTR_REVERSE :
+		term.cursor < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 
 	if (sel.alt == term.alt && selected(x, y + term.scroll))
 		glyph.mode ^= ATTR_REVERSE;
@@ -502,13 +505,12 @@ static char* kmap(KeySym k, u32 state)
 	return "";
 }
 
-
 static void tdeletechar(int n)
 {
 	int dst, src, size;
 	Glyph *line;
 
-	LIMIT(n, 0, term.col - term.c.x);
+	LIMIT(n, 1, term.col - term.c.x);
 
 	dst = term.c.x;
 	src = term.c.x + n;
@@ -524,7 +526,7 @@ static void tinsertblank(int n)
 	int dst, src, size;
 	Glyph *line;
 
-	LIMIT(n, 0, term.col - term.c.x);
+	LIMIT(n, 1, term.col - term.c.x);
 
 	dst = term.c.x + n;
 	src = term.c.x;
@@ -533,12 +535,6 @@ static void tinsertblank(int n)
 
 	memmove(&line[dst], &line[src], size * sizeof(Glyph));
 	tclearregion(src, term.c.y, dst - 1, term.c.y);
-}
-
-static void tputtab(int n)
-{
-	term.c.x &= ~7;
-	term.c.x += n << 3;
 }
 
 static void tmoveto(int x, int y)
@@ -868,7 +864,7 @@ static void csihandle(char command, int *arg, u32 nargs)
 		break;
 	case 'I': // CHT -- Cursor Forward Tabulation <n> tab stops
 	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
-		tputtab(arg[0]);
+		tmoveto((term.c.x & ~7) + (arg[0] << 3), term.c.y);
 		break;
 	case 'J': // ED -- Clear screen
 	case 'K': // EL -- Clear line
@@ -881,13 +877,15 @@ static void csihandle(char command, int *arg, u32 nargs)
 	case 'L': // IL -- Insert <n> blank lines
 		if (!BETWEEN(term.c.y, term.top, term.bot))
 			break;
-		for (int y = term.bot - arg[0]; y >= term.c.y; --y)
+		LIMIT(arg[0], 1, term.bot);
+		for (int y = term.bot - arg[0]; y >= (int) term.c.y; --y)
 			memmove(TLINE(y + arg[0]), TLINE(y), sizeof(*term.hist));
 		tclearregion(0, term.c.y, term.col - 1, term.c.y + arg[0] - 1);
 		break;
 	case 'M': // DL -- Delete <n> lines
 		if (!BETWEEN(term.c.y, term.top, term.bot))
 			break;
+		LIMIT(arg[0], 1, term.bot);
 		for (int y = term.c.y; y + arg[0] <= term.bot; ++y)
 			memmove(TLINE(y), TLINE(y + arg[0]), sizeof(*term.hist));
 		tclearregion(0, term.bot - arg[0] + 1, term.col - 1, term.bot);
@@ -900,6 +898,7 @@ static void csihandle(char command, int *arg, u32 nargs)
 		tscroll(arg[0]);
 		break;
 	case 'X': // ECH -- Erase <n> char
+		LIMIT(arg[0], 1, term.col - term.c.x);
 		tclearregion(term.c.x, term.c.y, term.c.x + arg[0] - 1, term.c.y);
 		break;
 	case 'c': // DA -- Device Attributes
@@ -930,10 +929,10 @@ static void csihandle(char command, int *arg, u32 nargs)
 		break;
 	case 'q': // DECSCUSR -- Set Cursor Style
 		if (BETWEEN(arg[0], 0, 6))
-			xw.cursor = arg[0];
+			term.cursor = arg[0];
 		break;
 	case 'r': // DECSTBM -- Set Scrolling Region
-		tsetscroll(arg[0] - 1, arg[1] - 1);
+		tsetscroll(arg[0] - 1, (arg[1] > 1 ? arg[1] : term.row) - 1);
 		tmoveto(0, 0);
 		break;
 	case 's': // DECSC -- Save cursor position
@@ -973,7 +972,7 @@ static escape_state eschandle(u8 ascii)
 		tnewline(ascii == 'E');
 		return ESC_NONE;
 	case 'M': // RI -- Reverse index
-		if (term.c.y == term.top)
+		if (term.c.y <= term.top)
 			tscroll(-1);
 		else
 			--term.c.y;
@@ -1000,7 +999,7 @@ static void tcontrolcode(u8 ascii)
 {
 	switch (ascii) {
 	case '\t':
-		tputtab(1);
+		tmoveto((term.c.x & ~7) + 8, term.c.y);
 		break;
 	case '\b':
 		tmoveto(term.c.x - 1, term.c.y);
@@ -1065,7 +1064,7 @@ static void tputc(u8 u)
 		tnewline(true);
 
 	static u8 *p;
-	if (BETWEEN(u, 128, 192)) {
+	if (BETWEEN(u, 128, 192) && (int) p & 3) {
 		// UTF-8 continuation byte
 		*p++ = u;
 		return;
@@ -1110,8 +1109,8 @@ static void __attribute__((noreturn)) run(void)
 	int xfd = XConnectionNumber(xw.dpy);
 	int nfd = MAX(xfd, ttyfd) + 1;
 	const struct timespec timeout = { 0, 1000000000 / FPS };
-	struct timespec now, last = { 0, 0 };
 	bool dirty = true;
+	struct timespec now, last = { 0, 0 };
 
 	for (;;) {
 		FD_ZERO(&read_fds);

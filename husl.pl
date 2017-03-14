@@ -18,8 +18,8 @@ map(hsl2rgb,
 	[210, 99, 61],   # Azure   --
 	[330, 99, 61],   # Pink    --
 	[150, 99, 61],   # Spring  --
-	[240, 11, 61],   # Gray    Comments
 	[300, 11, 16],   # Dark    Cursorline
+	[240, 11, 61],   # Gray    Comments
 	[ 30, 99, 61],   # Orange  Todo
 	[120, 99, 81],   # Green   Menus
 	[ 60, 99, 81],   # Yellow  Keywords
