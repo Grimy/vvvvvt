@@ -463,38 +463,6 @@ static char* kmap(KeySym k, u32 state)
 	return "";
 }
 
-static void tdeletechar(int n)
-{
-	int dst, src, size;
-	Glyph *line;
-
-	LIMIT(n, 1, term.col - term.c.x);
-
-	dst = term.c.x;
-	src = term.c.x + n;
-	size = term.col - src;
-	line = TLINE(term.c.y);
-
-	memmove(line + dst, line + src, size * sizeof(Glyph));
-	tclearregion(term.col - n, term.c.y, term.col - 1, term.c.y);
-}
-
-static void tinsertblank(int n)
-{
-	int dst, src, size;
-	Glyph *line;
-
-	LIMIT(n, 1, term.col - term.c.x);
-
-	dst = term.c.x + n;
-	src = term.c.x;
-	size = term.col - dst;
-	line = TLINE(term.c.y);
-
-	memmove(&line[dst], &line[src], size * sizeof(Glyph));
-	tclearregion(src, term.c.y, dst - 1, term.c.y);
-}
-
 static void tmoveto(int x, int y)
 {
 	term.c.x = LIMIT(x, 0, term.col - 1);
@@ -792,6 +760,7 @@ static void tsetmode(bool set, int arg)
 static void csihandle(char command, int *arg, u32 nargs)
 {
 	term.esc = ESC_NONE;
+	printf("%c\n", command);
 
 	// Argument default values
 	if (!strchr("JKcm", command)) {
@@ -802,9 +771,6 @@ static void csihandle(char command, int *arg, u32 nargs)
 		arg[0] = -arg[0];
 
 	switch (command) {
-	case '@': // ICH -- Insert <n> blank char
-		tinsertblank(arg[0]);
-		break;
 	case 'A': // CUU -- Cursor <n> Up
 	case 'B': // CUD -- Cursor <n> Down
 	case 'e': // VPR -- Cursor <n> Down
@@ -843,6 +809,7 @@ static void csihandle(char command, int *arg, u32 nargs)
 		if (!BETWEEN(term.c.y, term.top, term.bot))
 			break;
 		LIMIT(arg[0], 1, term.bot);
+
 		for (int y = term.bot - arg[0]; y >= (int) term.c.y; --y)
 			memmove(TLINE(y + arg[0]), TLINE(y), sizeof(*term.hist));
 		tclearregion(0, term.c.y, term.col - 1, term.c.y + arg[0] - 1);
@@ -856,7 +823,15 @@ static void csihandle(char command, int *arg, u32 nargs)
 		tclearregion(0, term.bot - arg[0] + 1, term.col - 1, term.bot);
 		break;
 	case 'P': // DCH -- Delete <n> char
-		tdeletechar(arg[0]);
+	case '@': // ICH -- Insert <n> blank char
+		LIMIT(arg[0], 1, term.col - term.c.x);
+		int dst = term.c.x + (command == '@' ? arg[0] : 0);
+		int src = term.c.x + (command == '@' ? 0 : arg[0]);
+		int size = term.col - (term.c.x + arg[0]);
+		int del = (command == '@' ? term.c.x : term.col - arg[0]);
+		Glyph *line = TLINE(term.c.y);
+		memmove(line + dst, line + src, size * sizeof(Glyph));
+		tclearregion(del, term.c.y, del + arg[0] - 1, term.c.y);
 		break;
 	case 'S': // SU -- Scroll <n> line up
 	case 'T': // SD -- Scroll <n> line down
