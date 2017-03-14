@@ -310,7 +310,7 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 		XftDrawRect(xw.draw, fg, x, y + 1, xw.cw, 1);
 
 	if (glyph.mode & ATTR_STRUCK)
-		XftDrawRect(xw.draw, fg, x, (y + 2 * winy) / 3, xw.cw, 1);
+		XftDrawRect(xw.draw, fg, x, (2 * y + winy) / 3, width, 1);
 
 	if (glyph.mode & ATTR_BAR)
 		XftDrawRect(xw.draw, fg, x, winy, 2, xw.ch);
