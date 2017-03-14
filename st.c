@@ -530,12 +530,10 @@ static void tswapscreen(void)
 	term.c = term.saved_c[term.alt];
 }
 
-static void tsetscroll(int a, int b)
+static void tsetscroll(int top, int bot)
 {
-	LIMIT(a, 0, term.row - 1);
-	LIMIT(b, 0, term.row - 1);
-	term.top = MIN(a, b);
-	term.bot = MAX(a, b);
+	term.top = top;
+	term.bot = bot;
 }
 
 static void tnewline(bool first_col)
@@ -913,11 +911,13 @@ static void csihandle(char command, int *arg, u32 nargs)
 		term.alt = term.hide = term.focus = term.charset = term.bracket_paste = false;
 		break;
 	case 'q': // DECSCUSR -- Set Cursor Style
-		if (BETWEEN(arg[0], 0, 6))
+		if (arg[0] <= 6)
 			term.cursor = arg[0];
 		break;
 	case 'r': // DECSTBM -- Set Scrolling Region
-		tsetscroll(arg[0] - 1, (arg[1] > 1 ? arg[1] : term.row) - 1);
+		if (arg[0] >= arg[1] || arg[1] >= term.row)
+			break;
+		tsetscroll(arg[0] - 1, arg[1] - 1);
 		tmoveto(0, 0);
 		break;
 	case 's': // DECSC -- Save cursor position
