@@ -37,7 +37,6 @@
 #define TLINE(y)		(term.hist[term.alt ? HIST_SIZE + (y) % 64 : ((y) + term.scroll) % HIST_SIZE])
 #define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
-#define ERRESC(...)		die("erresc: " __VA_ARGS__)
 
 typedef enum {
 	ATTR_BOLD       = 1 << 0,
@@ -736,7 +735,6 @@ static void ttynew(void)
 	case -1:
 		die("fork failed\n");
 	case 0:
-		close(1);
 		setsid(); // create a new process group
 		dup2(slave, 0);
 		dup2(slave, 1);
@@ -753,38 +751,44 @@ static void ttynew(void)
 	}
 }
 
-static void tsetattr(int attr)
+static int tsetattr(int *attr)
 {
-	switch (attr) {
+	switch (*attr) {
 	case 0:
 		memset(&term.c.attr, 0, sizeof(term.c.attr));
-		break;
+		return 1;
 	case 1 ... 9:
-		term.c.attr.mode |= 1 << (attr - 1);
-		break;
+		term.c.attr.mode |= 1 << (*attr - 1);
+		return 1;
 	case 21 ... 29:
-		term.c.attr.mode &= ~(1 << (attr - 21));
-		break;
+		term.c.attr.mode &= ~(1 << (*attr - 21));
+		return 1;
 	case 30 ... 37:
-		term.c.attr.fg = (u8) (attr - 30);
-		break;
+		term.c.attr.fg = (u8) (*attr - 30);
+		return 1;
+	case 38:
+		term.c.attr.fg = (u8) attr[2];
+		return 3;
 	case 39:
 		term.c.attr.fg = 0;
-		break;
+		return 1;
 	case 40 ... 47:
-		term.c.attr.bg = (u8) (attr - 40);
-		break;
+		term.c.attr.bg = (u8) (*attr - 40);
+		return 1;
+	case 48:
+		term.c.attr.bg = (u8) attr[2];
+		return 3;
 	case 49:
 		term.c.attr.bg = 0;
-		break;
+		return 1;
 	case 90 ... 97:
-		term.c.attr.fg = (u8) (attr - 90 + 8);
-		break;
+		term.c.attr.fg = (u8) (*attr - 90 + 8);
+		return 1;
 	case 100 ... 107:
-		term.c.attr.bg = (u8) (attr - 100 + 8);
-		break;
+		term.c.attr.bg = (u8) (*attr - 100 + 8);
+		return 1;
 	default:
-		ERRESC("attr %d unknown\n", attr);
+		return 1;
 	}
 }
 
@@ -792,8 +796,8 @@ static void tsetmode(bool set, int arg)
 {
 	switch (arg) {
 	case 1: // DECCKM -- Cursor key (ignored)
+	case 4: // IRM -- Insert Mode (TODO)
 	case 7: // DECAWM -- Auto wrap (ignored)
-		break;
 	case 12: // SRM -- Send/receive (TODO)
 		break;
 	case 25: // DECTCEM -- Text Cursor Enable Mode
@@ -821,10 +825,6 @@ static void tsetmode(bool set, int arg)
 	case 2004: // Bracketed paste mode
 		term.bracket_paste = set;
 		break;
-	case 4: // IRM -- Insert Mode (TODO)
-	default:
-		if (set)
-			ERRESC("unknown set/reset mode %d\n", arg);
 	}
 }
 
@@ -833,10 +833,10 @@ static void csihandle(char command, int *arg, u32 nargs)
 	term.esc = ESC_NONE;
 
 	// Argument default values
-	if (arg[0] == 0)
-		arg[0] = !strchr("JKcm", command);
-	if (arg[1] == 0)
-		arg[1] = 1;
+	if (!strchr("JKcm", command)) {
+		arg[0] += !arg[0];
+		arg[1] += !arg[1];
+	}
 	if (strchr("ADFTZ", command))
 		arg[0] = -arg[0];
 
@@ -915,17 +915,11 @@ static void csihandle(char command, int *arg, u32 nargs)
 			tsetmode(command == 'h', arg[i]);
 		break;
 	case 'm': // SGR -- Terminal attribute
-		if (arg[0] == 38 && arg[1] == 5)
-			term.c.attr.fg = (u8) (arg[2]);
-		else if (arg[0] == 48 && arg[1] == 5)
-			term.c.attr.bg = (u8) (arg[2]);
-		else
-			for (u32 i = 0; i < nargs; i++)
-				tsetattr(arg[i]);
+		for (u32 i = 0; i < nargs; i += tsetattr(arg + i));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (arg[0] != 6)
-			goto unknown;
+			break;
 		char buf[40];
 		int len = snprintf(buf, sizeof(buf),"\033[%i;%iR", term.c.y + 1, term.c.x + 1);
 		ttywrite(buf, len);
@@ -935,9 +929,8 @@ static void csihandle(char command, int *arg, u32 nargs)
 		term.alt = term.hide = term.focus = term.charset = term.bracket_paste = false;
 		break;
 	case 'q': // DECSCUSR -- Set Cursor Style
-		if (!BETWEEN(arg[0], 0, 6))
-			goto unknown;
-		xw.cursor = arg[0];
+		if (BETWEEN(arg[0], 0, 6))
+			xw.cursor = arg[0];
 		break;
 	case 'r': // DECSTBM -- Set Scrolling Region
 		tsetscroll(arg[0] - 1, arg[1] - 1);
@@ -949,9 +942,6 @@ static void csihandle(char command, int *arg, u32 nargs)
 	case 'u': // DECRC -- Restore cursor position
 		term.c = term.saved_c[term.alt];
 		break;
-	default:
-	unknown:
-		ERRESC("unknown CSI %c\n", command);
 	}
 }
 
