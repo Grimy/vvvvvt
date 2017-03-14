@@ -52,11 +52,6 @@ typedef enum {
 } glyph_attribute;
 
 typedef enum {
-	CURSOR_SAVE,
-	CURSOR_LOAD
-} cursor_movement;
-
-typedef enum {
 	MOUSE_NONE,
 	MOUSE_BUTTON = 1000,
 	MOUSE_MOTION = 1003,
@@ -145,29 +140,20 @@ static struct {
 static int ttyfd;
 static char **opt_cmd = (char*[]) { SHELL, NULL };
 
-// Graphical info
+// Drawing Context
 static struct {
 	Display *dpy;
 	Window win;
+	Color col[256];
+	XftFont *font[4];
 	Drawable buf;
-	Atom wmdeletewin;
+	GC gc;
 	XftDraw *draw;
-	Visual *vis;
-	XSetWindowAttributes attrs;
-	int scr;
 	int w, h;     // window width and height
 	int ch, cw;   // character width and height
 	bool visible;
 	bool focused;
-	int padding;
 } xw;
-
-// Drawing Context
-static struct {
-	Color col[256];
-	XftFont *font[4];
-	GC gc;
-} dc;
 
 // Escape sequences emitted when pressing special keys.
 static Key key[] = {
@@ -230,28 +216,26 @@ static bool selected(int x, int y)
 		&& (y != sel.ne.y || x <= sel.ne.x);
 }
 
-static void xloadfonts(char *fontstr)
+static void load_fonts(char *fontstr)
 {
+	if (!FcInit())
+		die("Could not init fontconfig.\n");
+
 	FcPattern *pattern = FcNameParse((FcChar8 *) fontstr);
 	FcResult result;
-
-	if (!pattern)
-		die("st: can't open font %s\n", fontstr);
-
-	FcPatternAddDouble(pattern, FC_SIZE, FONT_SIZE);
 
 	for (int i = 0; i < 4; ++i) {
 		FcPatternDel(pattern, FC_SLANT);
 		FcPatternDel(pattern, FC_WEIGHT);
 		FcPatternAddInteger(pattern, FC_SLANT, (i & 2) ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
 		FcPatternAddInteger(pattern, FC_WEIGHT, (i & 1) ? FC_WEIGHT_BOLD : FC_WEIGHT_NORMAL);
-		FcPattern *match = XftFontMatch(xw.dpy, xw.scr, pattern, &result);
-		dc.font[i] = XftFontOpenPattern(xw.dpy, match);
+		FcPattern *match = XftFontMatch(xw.dpy, DefaultScreen(xw.dpy), pattern, &result);
+		xw.font[i] = XftFontOpenPattern(xw.dpy, match);
 		FcPatternDestroy(match);
 	}
 
-	xw.cw = dc.font[0]->max_advance_width;
-	xw.ch = dc.font[0]->height;
+	xw.cw = xw.font[0]->max_advance_width;
+	xw.ch = xw.font[0]->height;
 	FcPatternDestroy(pattern);
 }
 
@@ -259,18 +243,14 @@ static void xinit(void)
 {
 	if (!(xw.dpy = XOpenDisplay(NULL)))
 		die("Can't open display\n");
-	xw.scr = XDefaultScreen(xw.dpy);
-	xw.vis = XDefaultVisual(xw.dpy, xw.scr);
 
-	// Fonts
-	if (!FcInit())
-		die("Could not init fontconfig.\n");
-	xloadfonts(FONTNAME);
+	load_fonts(FONTNAME);
 
 	// Colors
-	Colormap cmap = XDefaultColormap(xw.dpy, xw.scr);
-	for (u32 i = 0; i < LEN(dc.col); i++)
-		if (!XftColorAllocName(xw.dpy, xw.vis, cmap, colors[i], &dc.col[i]))
+	Visual *visual = XDefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
+	Colormap cmap = XDefaultColormap(xw.dpy, DefaultScreen(xw.dpy));
+	for (u32 i = 0; i < LEN(xw.col); i++)
+		if (!XftColorAllocName(xw.dpy, visual, cmap, colors[i], &xw.col[i]))
 			die("Could not allocate color %d\n", i);
 
 	// Set geometry to some arbitrary values while we wait for the resize event
@@ -278,23 +258,23 @@ static void xinit(void)
 	xw.h = term.row * xw.ch + 2 * BORDERPX;
 
 	// Events
-	xw.attrs.background_pixel = dc.col[0].pixel;
-	xw.attrs.event_mask = FocusChangeMask | KeyPressMask
-		| VisibilityChangeMask | StructureNotifyMask
-		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
-	xw.attrs.colormap = cmap;
+	int InputMask = KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
+	XSetWindowAttributes attrs = {
+		.background_pixel = xw.col[0].pixel,
+		.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask | InputMask,
+		.colormap = cmap,
+	};
 
-	Window parent = XRootWindow(xw.dpy, xw.scr);
+	Window parent = XRootWindow(xw.dpy, DefaultScreen(xw.dpy));
 	xw.win = XCreateWindow(xw.dpy, parent, 0, 0, xw.w, xw.h, 0,
-			XDefaultDepth(xw.dpy, xw.scr), InputOutput, xw.vis,
-			CWBackPixel | CWBorderPixel | CWBitGravity | CWEventMask | CWColormap,
-			&xw.attrs);
+			CopyFromParent, InputOutput, visual,
+			CWBackPixel | CWEventMask | CWColormap, &attrs);
 
 	// Graphic context
 	XGCValues gcvalues = { .graphics_exposures = False };
-	dc.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures, &gcvalues);
-	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, xw.scr));
-	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.attrs.colormap);
+	xw.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures, &gcvalues);
+	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, DefaultScreen(xw.dpy)));
+	xw.draw = XftDrawCreate(xw.dpy, xw.buf, visual, cmap);
 	XDefineCursor(xw.dpy, xw.win, XCreateFontCursor(xw.dpy, XC_xterm));
 
 	// Various
@@ -307,9 +287,9 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 {
 	bool bold = (glyph.mode & ATTR_BOLD) != 0;
 	bool italic = (glyph.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
-	XftFont *font = dc.font[bold + 2 * italic];
-	Color *fg = &dc.col[glyph.fg ? glyph.fg : DEFAULTFG];
-	Color *bg = &dc.col[glyph.bg];
+	XftFont *font = xw.font[bold + 2 * italic];
+	Color *fg = &xw.col[glyph.fg ? glyph.fg : DEFAULTFG];
+	Color *bg = &xw.col[glyph.bg];
 
 	int y = winy + font->ascent;
 	int width = xw.cw * len;
@@ -379,7 +359,7 @@ static void draw(void)
 	if (!xw.visible)
 		return;
 
-	XftDrawRect(xw.draw, dc.col, 0, 0, xw.w, xw.h);
+	XftDrawRect(xw.draw, xw.col, 0, 0, xw.w, xw.h);
 
 	for (int y = 0; y < term.row; ++y)
 		for (int x = 0; x < term.col; ++x)
@@ -387,8 +367,8 @@ static void draw(void)
 	// Flush
 	xdrawglyph(0, 0);
 
-	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, xw.w, xw.h, 0, 0);
-	XSetForeground(xw.dpy, dc.gc, dc.col[0].pixel);
+	XCopyArea(xw.dpy, xw.buf, xw.win, xw.gc, 0, 0, xw.w, xw.h, 0, 0);
+	XSetForeground(xw.dpy, xw.gc, xw.col[0].pixel);
 }
 
 static void ttywrite(const char *buf, size_t n)
@@ -592,9 +572,9 @@ static void resize(int width, int height)
 	xw.w = width;
 	xw.h = height;
 	XFreePixmap(xw.dpy, xw.buf);
-	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, xw.scr));
+	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, DefaultScreen(xw.dpy)));
 	XftDrawChange(xw.draw, xw.buf);
-	XftDrawRect(xw.draw, dc.col, 0, 0, xw.w, xw.h);
+	XftDrawRect(xw.draw, xw.col, 0, 0, xw.w, xw.h);
 
 	// Send our size to the tty driver so that applications can query it
 	struct winsize w = { (u16) term.row, (u16) term.col, 0, 0 };
@@ -659,7 +639,7 @@ static void bmotion(XEvent *e)
 {
 	XButtonEvent *ev = &e->xbutton;
 
-	if (term.mouse && !(ev->state & ShiftMask)) {
+	if (term.mouse == MOUSE_MOTION && !(ev->state & ShiftMask)) {
 		mousereport(ev);
 	} else if (ev->state & (Button1Mask | Button3Mask)) {
 		sel.oe = ev2point(ev);
@@ -810,9 +790,6 @@ static void tsetmode(bool set, int arg)
 		break;
 	case MOUSE_BUTTON:
 	case MOUSE_MOTION:
-		xw.attrs.event_mask &= ~PointerMotionMask;
-		xw.attrs.event_mask |= set * PointerMotionMask;
-		XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &xw.attrs);
 		term.mouse = set * arg;
 		break;
 	case 1004: // Report focus events

@@ -1,4 +1,3 @@
-#define FONT_SIZE 11
 #define LINE_SIZE 256
 #define HIST_SIZE 2048
 #define FPS 60
