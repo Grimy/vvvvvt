@@ -3,13 +3,13 @@
 use strict;
 use Convert::Color::HUSL;
 
-sub hsl2rgb   { [ map 256 * $_, Convert::Color::HUSL->new(@$_)->rgb ] }
+sub hsl2rgb   { [ map 65536 * $_, Convert::Color::HUSL->new(@$_)->rgb ] }
 sub sixd2rgb  { $_ ? 55 + 40 * $_ : 0 }
 sub grayscale { [(8 + 10 * $_) x 3] }
 
-print "static const char *colors[] = {\n";
+print "static const XftColor colors[] = {\n";
 
-printf "\t\"#%02x%02x%02x\",\n", @$_ for
+printf "\t{ 0, { 0x%04x, 0x%04x, 0x%04x, 0xffff } },\n", @$_ for
 map(hsl2rgb,
 	[270, 11,  7],   # Black   Background
 	[  0, 99, 61],   # Red     Error

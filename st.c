@@ -80,8 +80,6 @@ typedef uint64_t u64;
 typedef uint32_t Rune;
 #define Glyph Glyph_
 
-typedef XftColor Color;
-
 typedef struct {
 	u8 u[4];   // bytes
 	u16 mode;  // attribute flags
@@ -145,7 +143,6 @@ static char **opt_cmd = (char*[]) { SHELL, NULL };
 static struct {
 	Display *dpy;
 	Window win;
-	Color col[256];
 	XftFont *font[4];
 	Drawable buf;
 	GC gc;
@@ -238,42 +235,33 @@ static void load_fonts(char *fontstr)
 	FcPatternDestroy(pattern);
 }
 
-static void xinit(void)
+static void create_window(void)
 {
 	if (!(xw.dpy = XOpenDisplay(NULL)))
 		die("Can't open display\n");
-
-	load_fonts(FONTNAME);
-
-	// Colors
-	Visual *visual = XDefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
-	Colormap cmap = XDefaultColormap(xw.dpy, DefaultScreen(xw.dpy));
-	for (u32 i = 0; i < LEN(xw.col); i++)
-		if (!XftColorAllocName(xw.dpy, visual, cmap, colors[i], &xw.col[i]))
-			die("Could not allocate color %d\n", i);
 
 	// Set geometry to some arbitrary values while we wait for the resize event
 	xw.w = term.col * xw.cw + 2 * BORDERPX;
 	xw.h = term.row * xw.ch + 2 * BORDERPX;
 
 	// Events
-	int InputMask = KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
+	Visual *visual = XDefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
 	XSetWindowAttributes attrs = {
-		.background_pixel = xw.col[0].pixel,
-		.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask | InputMask,
-		.colormap = cmap,
+		.background_pixel = colors->pixel,
+		.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask
+			| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask,
 	};
 
 	Window parent = XRootWindow(xw.dpy, DefaultScreen(xw.dpy));
 	xw.win = XCreateWindow(xw.dpy, parent, 0, 0, xw.w, xw.h, 0,
 			CopyFromParent, InputOutput, visual,
-			CWBackPixel | CWEventMask | CWColormap, &attrs);
+			CWBackPixel | CWEventMask, &attrs);
 
 	// Graphic context
 	XGCValues gcvalues = { .graphics_exposures = False };
 	xw.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures, &gcvalues);
 	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, DefaultScreen(xw.dpy)));
-	xw.draw = XftDrawCreate(xw.dpy, xw.buf, visual, cmap);
+	xw.draw = XftDrawCreate(xw.dpy, xw.buf, visual, CopyFromParent);
 	XDefineCursor(xw.dpy, xw.win, XCreateFontCursor(xw.dpy, XC_xterm));
 
 	// Various
@@ -282,15 +270,14 @@ static void xinit(void)
 	XStoreName(xw.dpy, xw.win, "st");
 }
 
-static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
+static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 {
 	bool bold = (glyph.mode & ATTR_BOLD) != 0;
 	bool italic = (glyph.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = xw.font[bold + 2 * italic];
-	Color *fg = &xw.col[glyph.fg ? glyph.fg : DEFAULTFG];
-	Color *bg = &xw.col[glyph.bg];
-
-	int y = winy + font->ascent;
+	const XftColor *fg = &colors[glyph.fg ? glyph.fg : DEFAULTFG];
+	const XftColor *bg = &colors[glyph.bg];
+	int baseline = y + font->ascent;
 	int width = xw.cw * len;
 
 	if (glyph.mode & ATTR_REVERSE)
@@ -299,21 +286,18 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 	if (glyph.mode & ATTR_INVISIBLE)
 		fg = bg;
 
-	// Render the background
-	XftDrawRect(xw.draw, bg, x, winy, width, xw.ch);
+	// Draw the background, then the text, then decorations
+	XftDrawRect(xw.draw, bg, x, y, width, xw.ch);
+	XftDrawStringUtf8(xw.draw, fg, font, x, baseline, text, len);
 
-	// Render the glyphs
-	XftDrawStringUtf8(xw.draw, fg, font, x, y, buf, len);
-
-	// Render bars
 	if (glyph.mode & ATTR_UNDERLINE)
-		XftDrawRect(xw.draw, fg, x, y + 1, xw.cw, 1);
+		XftDrawRect(xw.draw, fg, x, baseline + 1, xw.cw, 1);
 
 	if (glyph.mode & ATTR_STRUCK)
-		XftDrawRect(xw.draw, fg, x, (2 * y + winy) / 3, width, 1);
+		XftDrawRect(xw.draw, fg, x, (2 * baseline + y) / 3, width, 1);
 
 	if (glyph.mode & ATTR_BAR)
-		XftDrawRect(xw.draw, fg, x, winy, 2, xw.ch);
+		XftDrawRect(xw.draw, fg, x, y, 2, xw.ch);
 }
 
 // Draws the glyph at the given terminal coordinates.
@@ -322,17 +306,17 @@ static void draw_glyph(int x, int y)
 	static u8 buf[4 * LINE_SIZE];
 	static int len;
 	static Glyph prev;
-	static int old_x, old_y;
+	static int draw_x, draw_y;
 
 	Glyph glyph = TLINE(y)[x];
 
-	// Draw selection and cursor
+	// Handle selection and cursor
+	if (sel.alt == term.alt && selected(x, y + term.scroll))
+		glyph.mode ^= ATTR_REVERSE;
+
 	int cursor = term.hide || term.scroll != term.lines ? 0 :
 		xw.focused && term.cursor < 3 ? ATTR_REVERSE :
 		term.cursor < 5 ? ATTR_UNDERLINE : ATTR_BAR;
-
-	if (sel.alt == term.alt && selected(x, y + term.scroll))
-		glyph.mode ^= ATTR_REVERSE;
 
 	if (x == term.c.x && y == term.c.y)
 		glyph.mode ^= cursor;
@@ -340,12 +324,10 @@ static void draw_glyph(int x, int y)
 	bool diff = glyph.fg != prev.fg || glyph.bg != prev.bg || glyph.mode != prev.mode;
 
 	if (x == 0 || diff) {
-		int xp = BORDERPX + old_x * xw.cw;
-		int yp = BORDERPX + old_y * xw.ch;
-		xdrawglyphfontspec(prev, buf, len, xp, yp);
+		draw_text(prev, buf, len, draw_x, draw_y);
 		len = 0;
-		old_x = x;
-		old_y = y;
+		draw_x = BORDERPX + x * xw.cw;
+		draw_y = BORDERPX + y * xw.ch;
 		prev = glyph;
 	}
 
@@ -357,7 +339,7 @@ static void draw_glyph(int x, int y)
 // Redraws all glyphs on our buffer, then flushes it to the window.
 static void draw(void)
 {
-	XftDrawRect(xw.draw, xw.col, 0, 0, xw.w, xw.h);
+	XftDrawRect(xw.draw, colors, 0, 0, xw.w, xw.h);
 
 	for (int y = 0; y < term.row; ++y)
 		for (int x = 0; x < term.col; ++x)
@@ -568,7 +550,7 @@ static void resize(int width, int height)
 	XFreePixmap(xw.dpy, xw.buf);
 	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, DefaultScreen(xw.dpy)));
 	XftDrawChange(xw.draw, xw.buf);
-	XftDrawRect(xw.draw, xw.col, 0, 0, xw.w, xw.h);
+	XftDrawRect(xw.draw, colors, 0, 0, xw.w, xw.h);
 
 	// Send our size to the tty driver so that applications can query it
 	struct winsize w = { (u16) term.row, (u16) term.col, 0, 0 };
@@ -1136,7 +1118,8 @@ int main(int argc, char *argv[])
 	term.row = 24;
 	term.col = 80;
 	setlocale(LC_CTYPE, "");
-	xinit();
+	create_window();
+	load_fonts(FONTNAME);
 	ttynew();
 	run();
 }

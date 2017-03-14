@@ -1,3 +1,4 @@
 * Refactor tdeletechar, tinstertblank
 * Selecting inside Vim doesn’t work
 * CSI scroll should always be a hard scroll
+* Newline scroll should be a hard scroll if term.top != 0
