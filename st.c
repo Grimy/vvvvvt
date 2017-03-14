@@ -25,19 +25,20 @@
 #include "config.h"
 
 // Macros
-#define MIN(a, b)		((a) < (b) ? (a) : (b))
-#define MAX(a, b)		((a) < (b) ? (b) : (a))
-#define LEN(a)			(sizeof(a) / sizeof(a)[0])
-#define BETWEEN(x, a, b)	((a) <= (x) && (x) <= (b))
-#define ISCONTROL(c)		((c) < 0x20 || (c) == 0x7f)
-#define LIMIT(x, a, b)		((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
-#define SWAP(a, b)		do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
-#define TLINE(y)		(term.hist[term.alt ? HIST_SIZE + (y) % 64 : ((y) + term.scroll) % HIST_SIZE])
-#define die(...)		do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
+#define MIN(a, b)           ((a) < (b) ? (a) : (b))
+#define MAX(a, b)           ((a) < (b) ? (b) : (a))
+#define LEN(a)              (sizeof(a) / sizeof(a)[0])
+#define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
+#define IS_CONTROL(c)       ((c) < 0x20 || (c) == 0x7f)
+#define IS_CONTINUATION(c)  ((c) >> 6 == 2)
+#define IS_DELIM(c)         (strchr(" <>'`\"(){}", (c)) != NULL)
+#define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
+#define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
+#define TLINE(y)            (term.hist[term.alt ? HIST_SIZE + (y) % 64 : ((y) + term.scroll) % HIST_SIZE])
+#define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 
-#define ISDELIM(u)		(strchr(" <>'`\"(){}", u) != NULL)
-#define TIMEDIFF(t1, t2)	((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
-#define AFTER(a, b)		((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
+#define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
+#define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 
 typedef enum {
 	ATTR_BOLD       = 1 << 0,
@@ -178,8 +179,6 @@ static Key key[] = {
 	{ XK_Next,          0,            "\033[6~"   },
 };
 
-static void (*handler[LASTEvent])(XEvent *);
-
 static Point ev2point(XButtonEvent *e)
 {
 	int x = (e->x - BORDERPX) / xw.cw;
@@ -189,10 +188,10 @@ static Point ev2point(XButtonEvent *e)
 	return (Point) { x, y + term.scroll };
 }
 
-static void selsnap(int *x, int y, int direction)
+static void selsnap(int *x, Glyph *line, int direction)
 {
 	if (sel.snap == SNAP_WORD) {
-		while (BETWEEN(*x, 0, term.col - 1) && !ISDELIM(TLINE(y)[*x].u[0]))
+		while (BETWEEN(*x, 0, term.col - 1) && !IS_DELIM(line[*x].u[0]))
 			*x += direction;
 		*x -= direction;
 	} else if (sel.snap == SNAP_LINE) {
@@ -205,8 +204,8 @@ static void selnormalize(void)
 	bool swapped = AFTER(sel.ob, sel.oe);
 	sel.nb = swapped ? sel.oe : sel.ob;
 	sel.ne = swapped ? sel.ob : sel.oe;
-	selsnap(&sel.nb.x, sel.nb.y - term.scroll, -1);
-	selsnap(&sel.ne.x, sel.ne.y - term.scroll, +1);
+	selsnap(&sel.nb.x, TLINE(sel.nb.y - term.scroll), -1);
+	selsnap(&sel.ne.x, TLINE(sel.ne.y - term.scroll), +1);
 }
 
 static bool selected(int x, int y)
@@ -317,7 +316,8 @@ static void xdrawglyphfontspec(Glyph glyph, u8 *buf, int len, int x, int winy)
 		XftDrawRect(xw.draw, fg, x, winy, 2, xw.ch);
 }
 
-static void xdrawglyph(int x, int y)
+// Draws the glyph at the given terminal coordinates.
+static void draw_glyph(int x, int y)
 {
 	static u8 buf[4 * LINE_SIZE];
 	static int len;
@@ -349,26 +349,22 @@ static void xdrawglyph(int x, int y)
 		prev = glyph;
 	}
 
-	int utf_len = *glyph.u < 192 ? 1 : *glyph.u < 224 ? 2 : *glyph.u < 240 ? 3 : 4;
-	for (int i = 0; i < utf_len; ++i)
-		buf[len++] = MAX(glyph.u[i], ' ');
+	buf[len++] = MAX(glyph.u[0], ' ');
+	for (int i = 1; i < 4 && IS_CONTINUATION(glyph.u[i]); ++i)
+		buf[len++] = glyph.u[i];
 }
 
+// Redraws all glyphs on our buffer, then flushes it to the window.
 static void draw(void)
 {
-	if (!xw.visible)
-		return;
-
 	XftDrawRect(xw.draw, xw.col, 0, 0, xw.w, xw.h);
 
 	for (int y = 0; y < term.row; ++y)
 		for (int x = 0; x < term.col; ++x)
-			xdrawglyph(x, y);
-	// Flush
-	xdrawglyph(0, 0);
+			draw_glyph(x, y);
+	draw_glyph(0, 0);
 
 	XCopyArea(xw.dpy, xw.buf, xw.win, xw.gc, 0, 0, xw.w, xw.h, 0, 0);
-	XSetForeground(xw.dpy, xw.gc, xw.col[0].pixel);
 }
 
 static void ttywrite(const char *buf, size_t n)
@@ -698,6 +694,18 @@ static void selclear(__attribute__((unused)) XEvent *e)
 	sel.ne.y = -1;
 }
 
+static void (*handler[LASTEvent])(XEvent *) = {
+	[KeyPress] = kpress,
+	[ConfigureNotify] = configure_notify,
+	[VisibilityNotify] = visibility,
+	[FocusIn] = focus,
+	[FocusOut] = focus,
+	[MotionNotify] = bmotion,
+	[ButtonPress] = bpress,
+	[ButtonRelease] = brelease,
+	[SelectionClear] = selclear,
+};
+
 static void ttynew(void)
 {
 	int slave;
@@ -1007,7 +1015,7 @@ static void tputc(u8 u)
 	// Actions of control codes must be performed as soon they arrive
 	// because they can be embedded inside a control sequence, and
 	// they must not cause conflicts with sequences.
-	if (ISCONTROL(u)) {
+	if (IS_CONTROL(u)) {
 		if (term.esc == ESC_STR)
 			term.esc = ESC_NONE;
 		else
@@ -1041,8 +1049,7 @@ static void tputc(u8 u)
 		tnewline(true);
 
 	static u8 *p;
-	if (BETWEEN(u, 128, 192) && (int) p & 3) {
-		// UTF-8 continuation byte
+	if (IS_CONTINUATION(u) && (int) p & 3) {
 		*p++ = u;
 		return;
 	}
@@ -1113,25 +1120,13 @@ static void __attribute__((noreturn)) run(void)
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
 
-		if (dirty && TIMEDIFF(now, last) > 1000 / FPS) {
+		if (dirty && xw.visible && TIMEDIFF(now, last) > 1000 / FPS) {
 			draw();
 			dirty = false;
 			last = now;
 		}
 	}
 }
-
-static void (*handler[LASTEvent])(XEvent *) = {
-	[KeyPress] = kpress,
-	[ConfigureNotify] = configure_notify,
-	[VisibilityNotify] = visibility,
-	[FocusIn] = focus,
-	[FocusOut] = focus,
-	[MotionNotify] = bmotion,
-	[ButtonPress] = bpress,
-	[ButtonRelease] = brelease,
-	[SelectionClear] = selclear,
-};
 
 int main(int argc, char *argv[])
 {
