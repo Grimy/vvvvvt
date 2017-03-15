@@ -25,9 +25,8 @@
 #include "config.h"
 
 // Macros
-#define MIN(a, b)           ((a) < (b) ? (a) : (b))
 #define MAX(a, b)           ((a) < (b) ? (b) : (a))
-#define LEN(a)              (sizeof(a) / sizeof(a)[0])
+#define LEN(a)              (sizeof(a) / sizeof(*(a)))
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
 #define IS_CONTROL(c)       ((c) < 0x20 || (c) == 0x7f)
 #define IS_CONTINUATION(c)  ((c) >> 6 == 2)
@@ -39,6 +38,16 @@
 
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
+
+#define Glyph Glyph_
+
+typedef enum { false, true } bool;
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+
+enum { SNAP_NONE, SNAP_WORD, SNAP_LINE };
 
 typedef enum {
 	ATTR_BOLD       = 1 << 0,
@@ -57,20 +66,6 @@ typedef enum {
 	MOUSE_BUTTON = 1000,
 	MOUSE_MOTION = 1003,
 } mouse_mode;
-
-typedef enum {
-	SNAP_WORD = 1,
-	SNAP_LINE = 2
-} selection_snap;
-
-typedef enum { false, true } bool;
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-
-typedef uint32_t Rune;
-#define Glyph Glyph_
 
 typedef struct {
 	u8 u[4];   // bytes
@@ -107,9 +102,10 @@ static struct {
 
 static struct {
 	char buf[BUFSIZ];
-	ssize_t len;
-	int i;
+	char *c;
+	char *last;
 	int fd;
+	int: 32;
 } tty;
 
 // Terminal state
@@ -182,7 +178,7 @@ static void selsnap(int *x, Glyph *line, int direction)
 		while (BETWEEN(*x, 0, term.col - 1) && !IS_DELIM(line[*x].u[0]))
 			*x += direction;
 		*x -= direction;
-	} else if (sel.snap == SNAP_LINE) {
+	} else if (sel.snap >= SNAP_LINE) {
 		*x = (direction < 0) ? 0 : term.col - 1;
 	}
 }
@@ -598,12 +594,12 @@ static void bpress(XEvent *e)
 	case Button1:
 		sel.alt = term.alt;
 		if (sel.ob.x == point.x && sel.ob.y == point.y) {
-			sel.snap = MIN(sel.snap + 1, SNAP_LINE);
+			++sel.snap;
 			selnormalize();
 		} else {
 			sel.ob = sel.oe = point;
 			sel.ne.y = -1;
-			sel.snap = 0;
+			sel.snap = SNAP_NONE;
 		}
 		break;
 	case Button3:
@@ -651,14 +647,14 @@ static void (*handler[LASTEvent])(XEvent *) = {
 
 static char ttyread(void)
 {
-	if (tty.i >= tty.len) {
-		tty.i = 0;
-		tty.len = read(tty.fd, tty.buf, BUFSIZ);
-		if (tty.len < 0)
+	if (tty.c >= tty.last) {
+		tty.c = tty.buf;
+		tty.last = tty.buf + read(tty.fd, tty.buf, BUFSIZ);
+		if (tty.last < tty.buf)
 			exit(0);
 	}
 
-	return tty.buf[tty.i++];
+	return *tty.c++;
 }
 
 static void ttynew(void)
@@ -1046,8 +1042,8 @@ static void __attribute__((noreturn)) run(void)
 				term.scroll = term.lines;
 
 			tputc(ttyread());
-			while (tty.i < tty.len)
-				tputc(tty.buf[tty.i++]);
+			while (tty.c < tty.last)
+				tputc(*tty.c++);
 		}
 
 		XEvent ev;

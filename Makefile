@@ -33,7 +33,7 @@ fuzz: st-fuzz
 	afl-fuzz -iinput -ooutput -m99M ./$^ cat @@
 
 report: st
-	time perf record ./st perl -E 'say "a‽béc*" x 4e7'
+	time perf record ./st perl -E 'say "\e[1;3;7mOù‽" x 4e7'
 	perf report
 
 .PHONY: report fuzz
