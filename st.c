@@ -275,7 +275,7 @@ static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 	bool bold = (glyph.mode & ATTR_BOLD) != 0;
 	bool italic = (glyph.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = xw.font[bold + 2 * italic];
-	const XftColor *fg = &colors[glyph.fg ? glyph.fg : DEFAULTFG];
+	const XftColor *fg = &colors[glyph.fg && glyph.fg != glyph.bg ? glyph.fg : DEFAULTFG];
 	const XftColor *bg = &colors[glyph.bg];
 	int baseline = y + font->ascent;
 	int width = xw.cw * len;

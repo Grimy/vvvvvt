@@ -4,8 +4,8 @@ use strict;
 use Convert::Color::HUSL;
 
 sub hsl2rgb   { [ map 65536 * $_, Convert::Color::HUSL->new(@$_)->rgb ] }
-sub sixd2rgb  { $_ ? 55 + 40 * $_ : 0 }
-sub grayscale { [(8 + 10 * $_) x 3] }
+sub sixd2rgb  { $_ ? 257 * (55 + 40 * $_) : 0 }
+sub grayscale { [(257 * (8 + 10 * $_)) x 3] }
 
 print "static const XftColor colors[] = {\n";
 
