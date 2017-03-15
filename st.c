@@ -406,12 +406,12 @@ static void xsel(char* opts, bool copy)
 		return;
 
 	FILE* pipe = popen(opts, copy ? "w" : "r");
-	char sel_buf[512];
+	char sel_buf[BUFSIZ];
 
 	if (copy)
 		getsel(pipe);
 	else
-		ttywrite(sel_buf, fread(sel_buf, 1, 512, pipe));
+		ttywrite(sel_buf, fread(sel_buf, 1, BUFSIZ, pipe));
 	fclose(pipe);
 }
 
@@ -570,7 +570,6 @@ static void focus(XEvent *ev)
 		return;
 
 	xw.focused = ev->type == FocusIn;
-
 	if (term.focus)
 		ttywrite(xw.focused ? "\033[I" : "\033[O", 3);
 }
@@ -664,29 +663,13 @@ static char ttyread(void)
 
 static void ttynew(void)
 {
-	int slave;
-	struct winsize w = { (unsigned short) term.row, (unsigned short) term.col, 0, 0 };
-
-	// seems to work fine on linux, openbsd and freebsd
-	if (openpty(&tty.fd, &slave, NULL, NULL, &w) < 0)
-		die("openpty failed: %s\n", strerror(errno));
-
-	switch (fork()) {
+	switch (forkpty(&tty.fd, NULL, NULL, &(struct winsize) { 24, 80, 0, 0 })) {
 	case -1:
-		die("fork failed\n");
+		die("forkpty failed\n");
 	case 0:
-		setsid(); // create a new process group
-		dup2(slave, 0);
-		dup2(slave, 1);
-		dup2(slave, 2);
-		if (ioctl(slave, TIOCSCTTY, NULL) < 0)
-			die("ioctl TIOCSCTTY failed: %s\n", strerror(errno));
-		close(slave);
-		close(tty.fd);
 		execvp(opt_cmd[0], opt_cmd);
 		die("exec failed: %s\n", strerror(errno));
 	default:
-		close(slave);
 		signal(SIGCHLD, SIG_IGN);
 	}
 }
