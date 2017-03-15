@@ -25,6 +25,7 @@
 #include "config.h"
 
 // Macros
+#define MIN(a, b)           ((a) > (b) ? (b) : (a))
 #define MAX(a, b)           ((a) < (b) ? (b) : (a))
 #define LEN(a)              (sizeof(a) / sizeof(*(a)))
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
@@ -33,7 +34,7 @@
 #define IS_DELIM(c)         (strchr(" <>'`\"(){}", (c)) != NULL)
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
-#define TLINE(y)            (term.hist[term.alt ? HIST_SIZE + (y) % 64 : ((y) + term.scroll) % HIST_SIZE])
+#define TLINE(y)            (term.hist[term.alt ? HIST_SIZE + ((y) + term.scroll) % 64 : ((y) + term.scroll) % HIST_SIZE])
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
@@ -68,10 +69,10 @@ typedef enum {
 } mouse_mode;
 
 typedef struct {
-	u8 u[4];   // bytes
-	u16 mode;  // attribute flags
-	u8 fg;     // foreground
-	u8 bg;     // background
+	u8 u[4];   // raw UTF-8 bytes
+	u16 mode;  // attribute bitmask
+	u8 fg;     // foreground color
+	u8 bg;     // background color
 } Glyph;
 
 typedef struct {
@@ -365,19 +366,21 @@ static void tclearregion(int x1, int y1, int x2, int y2)
 	}
 }
 
+static void move_region(int start, int end, int diff) {
+	int step = diff < 0 ? -1 : 1;
+	if (diff < 0)
+		SWAP(start, end);
+	int last = end - diff + step;
+	for (int y = start; y != last; y += step)
+		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
+	tclearregion(0, MIN(last, end), term.col - 1, MAX(last, end));
+}
+
 static void tscroll(int n)
 {
 	if (!term.alt) {
 		term.scroll += n;
 		LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + term.row), term.lines);
-	} else if (n > 0) {
-		for (int y = term.top; y <= term.bot - n; ++y)
-			memcpy(TLINE(y), TLINE(y + n), sizeof(TLINE(y)));
-		tclearregion(0, term.bot - n + 1, term.col - 1, term.bot);
-	} else if (n < 0) {
-		for (int y = term.bot; y >= term.top - n; --y)
-			memcpy(TLINE(y), TLINE(y + n), sizeof(TLINE(y)));
-		tclearregion(0, term.top, term.col - 1, term.top - n - 1);
 	}
 }
 
@@ -476,11 +479,13 @@ static void tsetscroll(int top, int bot)
 static void tnewline(bool first_col)
 {
 	if (term.c.y == term.bot) {
-		if (!term.alt)
+		if (term.top) {
+			move_region(term.top, term.bot, 1);
+		} else {
 			++term.lines;
-		tscroll(1);
-		if (!term.alt)
+			++term.scroll;
 			tclearregion(0, term.bot, term.col - 1, term.row - 1);
+		}
 	} else {
 		++term.c.y;
 	}
@@ -820,22 +825,12 @@ static void csihandle()
 			*arg == 1 || command == 'K' ? term.c.y : term.row - 1);
 		break;
 	case 'L': // IL -- Insert <n> blank lines
-		if (!BETWEEN(term.c.y, term.top, term.bot))
-			break;
-		LIMIT(*arg, 1, term.bot);
-
-		for (int y = term.bot - *arg; y >= (int) term.c.y; --y)
-			memmove(TLINE(y + *arg), TLINE(y), sizeof(*term.hist));
-		tclearregion(0, term.c.y, term.col - 1, term.c.y + *arg - 1);
-		break;
 	case 'M': // DL -- Delete <n> lines
 		if (!BETWEEN(term.c.y, term.top, term.bot))
 			break;
 		LIMIT(*arg, 1, term.bot);
-
-		for (int y = term.c.y; y + *arg <= term.bot; ++y)
-			memmove(TLINE(y), TLINE(y + *arg), sizeof(*term.hist));
-		tclearregion(0, term.bot - *arg + 1, term.col - 1, term.bot);
+		move_region(term.c.y, term.bot, command == 'L' ? -*arg : *arg);
+		term.c.x = 0;
 		break;
 	case 'P': // DCH -- Delete <n> char
 	case '@': // ICH -- Insert <n> blank char
@@ -849,10 +844,10 @@ static void csihandle()
 		tclearregion(del, term.c.y, del + *arg - 1, term.c.y);
 		break;
 	case 'S': // SU -- Scroll <n> line up
-		tscroll(MAX(*arg, 1));
+		move_region(term.top, term.bot, MAX(*arg, 1));
 		break;
 	case 'T': // SD -- Scroll <n> line down
-		tscroll(-MAX(*arg, 1));
+		move_region(term.top, term.bot, -MAX(*arg, 1));
 		break;
 	case 'X': // ECH -- Erase <n> char
 		LIMIT(*arg, 1, term.col - term.c.x);
@@ -939,7 +934,7 @@ static void eschandle(u8 ascii)
 		break;
 	case 'M': // RI -- Reverse index
 		if (term.c.y <= term.top)
-			tscroll(-1);
+			move_region(term.top, term.bot, -1);
 		else
 			--term.c.y;
 		break;
@@ -1031,16 +1026,12 @@ static void __attribute__((noreturn)) run(void)
 		FD_SET(xfd, &read_fds);
 
 		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
-
 		if (result < 0)
 			die("select failed: %s\n", strerror(errno));
-
 		dirty |= result > 0;
 
 		if (FD_ISSET(tty.fd, &read_fds)) {
-			if (!term.alt)
-				term.scroll = term.lines;
-
+			term.scroll = term.lines;
 			tputc(ttyread());
 			while (tty.c < tty.last)
 				tputc(*tty.c++);
@@ -1054,7 +1045,6 @@ static void __attribute__((noreturn)) run(void)
 		}
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
-
 		if (dirty && xw.visible && TIMEDIFF(now, last) > 1000 / FPS) {
 			draw();
 			dirty = false;

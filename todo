@@ -1,5 +1,3 @@
-* Refactor CSI L, CSI M to use the same logic as scrolling
 * Test CSI P, CSI @
 * Selecting inside Vim doesn’t work
-* CSI scroll should always be a hard scroll
-* Newline scroll should be a hard scroll if term.top != 0
+* Have one struct per screen (base, alt)
