@@ -63,12 +63,6 @@ enum {
 	ATTR_STRUCK     = 1 << 8,
 };
 
-typedef enum {
-	MOUSE_NONE,
-	MOUSE_BUTTON = 1000,
-	MOUSE_MOTION = 1003,
-} mouse_mode;
-
 typedef struct {
 	u8 u[4];   // raw UTF-8 bytes
 	u16 mode;  // attribute bitmask
@@ -120,9 +114,9 @@ static struct {
 	int scroll;                            // current scroll position
 	int top;                               // top scroll limit
 	int bot;                               // bottom scroll limit
-	mouse_mode mouse;                      // terminal mode flags
 	int lines;
 	int cursor;                            // cursor style
+	bool report_buttons, report_motion;      // terminal mode flags
 	bool alt, hide, focus, charset, bracket_paste;
 } term;
 
@@ -425,17 +419,13 @@ static void mousereport(XButtonEvent *e)
 
 	Point point = ev2point(e);
 	int x = point.x, y = point.y - term.scroll;
-	int button = e->button;
+	int button = e->type == ButtonRelease ? 3 : e->button - Button1;
 
 	if (x > 222 || y > 222)
 		return;
 
-	if (e->type == MotionNotify) {
-		if (term.mouse != MOUSE_MOTION || (x == ox && y == oy))
-			return;
-	} else {
-		button = e->type == ButtonRelease ? 3 : button - Button1;
-	}
+	if (e->type == MotionNotify && x == ox && y == oy)
+		return;
 
 	ox = x;
 	oy = y;
@@ -571,7 +561,7 @@ static void bmotion(XEvent *e)
 {
 	XButtonEvent *ev = &e->xbutton;
 
-	if (term.mouse == MOUSE_MOTION && !(ev->state & ShiftMask)) {
+	if (term.report_motion && !(ev->state & ShiftMask)) {
 		mousereport(ev);
 	} else if (ev->state & (Button1Mask | Button3Mask)) {
 		sel.oe = ev2point(ev);
@@ -584,7 +574,7 @@ static void bpress(XEvent *e)
 	XButtonEvent *ev = &e->xbutton;
 	Point point = ev2point(ev);
 
-	if (term.mouse && !(ev->state & ShiftMask))
+	if (term.report_buttons && !(ev->state & ShiftMask))
 		mousereport(ev);
 
 	switch (ev->button) {
@@ -617,7 +607,7 @@ static void brelease(XEvent *e)
 {
 	XButtonEvent *ev = &e->xbutton;
 
-	if (term.mouse && !(ev->state & ShiftMask))
+	if (term.report_buttons && !(ev->state & ShiftMask))
 		mousereport(ev);
 	else if (ev->button == Button2)
 		xsel("xsel -po", false);
@@ -711,7 +701,7 @@ static int set_attr(int *attr)
 static void set_mode(bool set, int mode)
 {
 	switch (mode) {
-	case 25: // Show cursor
+	case 25:   // Show cursor
 		term.hide = !set;
 		break;
 	case 47:
@@ -723,9 +713,10 @@ static void set_mode(bool set, int mode)
 		if (set)
 			clear_region(0, 0, term.col - 1, term.row - 1);
 		break;
-	case MOUSE_BUTTON:
-	case MOUSE_MOTION:
-		term.mouse = set * mode;
+	case 1000: // Report mouse buttons
+	case 1003: // Report mouse motion
+		term.report_buttons = set;
+		term.report_motion = mode == 1003 && set;
 		break;
 	case 1004: // Report focus events
 		term.focus = set;
