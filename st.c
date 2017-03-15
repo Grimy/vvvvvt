@@ -337,16 +337,8 @@ static void draw(void)
 	XCopyArea(xw.dpy, xw.buf, xw.win, xw.gc, 0, 0, xw.w, xw.h, 0, 0);
 }
 
-static void ttywrite(const char *buf, size_t n)
-{
-	while (n > 0) {
-		ssize_t result = write(tty.fd, buf, n);
-		if (result < 0)
-			die("write error on tty: %s\n", strerror(errno));
-		n -= result;
-		buf += result;
-	}
-}
+#define ttywrite(fmt, ...) dprintf(tty.fd, fmt, __VA_ARGS__)
+// #define ttywrite(fmt, ...) do { if (dprintf(tty.fd, fmt, __VA_ARGS__) < 0) die("write error on tty: %s\n", strerror(errno)); } while (0)
 
 static void tclearregion(int x1, int y1, int x2, int y2)
 {
@@ -406,12 +398,15 @@ static void xsel(char* opts, bool copy)
 		return;
 
 	FILE* pipe = popen(opts, copy ? "w" : "r");
-	char sel_buf[BUFSIZ];
 
-	if (copy)
+	if (copy) {
 		getsel(pipe);
-	else
-		ttywrite(sel_buf, fread(sel_buf, 1, BUFSIZ, pipe));
+	} else {
+		char sel_buf[BUFSIZ] = { 0 };
+		fread(sel_buf, 1, BUFSIZ, pipe);
+		ttywrite("%s", sel_buf);
+	}
+
 	fclose(pipe);
 }
 
@@ -422,7 +417,6 @@ static void mousereport(XButtonEvent *e)
 	Point point = ev2point(e);
 	int x = point.x, y = point.y - term.scroll;
 	int button = e->button;
-	char buf[40];
 
 	if (x > 222 || y > 222)
 		return;
@@ -441,8 +435,7 @@ static void mousereport(XButtonEvent *e)
 		+ ((e->state & Mod4Mask   ) ? 8  : 0)
 		+ ((e->state & ControlMask) ? 16 : 0);
 
-	int len = snprintf(buf, sizeof(buf), "\033[M%c%c%c", 32 + button, 33 + x, 33 + y);
-	ttywrite(buf, len);
+	ttywrite("\033[M%c%c%c", 32 + button, 33 + x, 33 + y);
 }
 
 static char* kmap(KeySym k, u32 state)
@@ -453,13 +446,13 @@ static char* kmap(KeySym k, u32 state)
 	return "";
 }
 
-static void tmoveto(int x, int y)
+static void move_to(int x, int y)
 {
 	term.c.x = LIMIT(x, 0, term.col - 1);
 	term.c.y = LIMIT(y, 0, term.row - 1);
 }
 
-static void tswapscreen(void)
+static void swap_screen(void)
 {
 	static int scroll_save = 0;
 
@@ -470,13 +463,7 @@ static void tswapscreen(void)
 	term.c = term.saved_c[term.alt];
 }
 
-static void tsetscroll(int top, int bot)
-{
-	term.top = top;
-	term.bot = bot;
-}
-
-static void tnewline(bool first_col)
+static void newline(bool first_col)
 {
 	if (term.c.y == term.bot) {
 		if (term.top) {
@@ -501,8 +488,9 @@ static void resize(int width, int height)
 	// Update terminal info
 	term.col = col;
 	term.row = row;
-	tsetscroll(0, row - 1);
-	tmoveto(term.c.x, term.c.y);
+	term.top = 0;
+	term.bot = row - 1;
+	move_to(term.c.x, term.c.y);
 
 	// Update X window data
 	xw.w = width;
@@ -521,7 +509,7 @@ static void resize(int width, int height)
 static void kpress(XEvent *e)
 {
 	XKeyEvent *ev = &e->xkey;
-	char buf[8];
+	char buf[8] = { 0 };
 	KeySym ksym;
 	int len = XLookupString(ev, buf, LEN(buf) - 1, &ksym, NULL);
 
@@ -540,12 +528,10 @@ static void kpress(XEvent *e)
 		xsel("xsel -bi", true);
 	else if (ksym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
 		xsel("xsel -bo", false);
-	else if (len && *buf != '\b' && *buf != '\x7F') {
-		ttywrite(buf, len);
-	} else {
-		char *customkey = kmap(ksym, ev->state);
-		ttywrite(customkey, strlen(customkey));
-	}
+	else if (len && *buf != '\b' && *buf != '\x7F')
+		ttywrite("%s", buf);
+	else
+		ttywrite("%s", kmap(ksym, ev->state));
 }
 
 static void configure_notify(XEvent *e)
@@ -571,7 +557,7 @@ static void focus(XEvent *ev)
 
 	xw.focused = ev->type == FocusIn;
 	if (term.focus)
-		ttywrite(xw.focused ? "\033[I" : "\033[O", 3);
+		ttywrite("\033[%c", xw.focused ? 'I' : 'O');
 }
 
 static void bmotion(XEvent *e)
@@ -718,7 +704,7 @@ static int set_attr(int *attr)
 static void set_mode(bool set, int mode)
 {
 	switch (mode) {
-	case 25: // DECTCEM -- Text Cursor Enable Mode
+	case 25: // Show cursor
 		term.hide = !set;
 		break;
 	case 47:
@@ -726,7 +712,7 @@ static void set_mode(bool set, int mode)
 	case 1048:
 	case 1049: // Swap screen & set/restore cursor
 		if (set ^ term.alt)
-			tswapscreen();
+			swap_screen();
 		if (set)
 			tclearregion(0, 0, term.col - 1, term.row - 1);
 		break;
@@ -764,35 +750,35 @@ static void handle_csi()
 	case '\030':
 		break;
 	case 'A': // CUU -- Cursor <n> Up
-		tmoveto(term.c.x, term.c.y - MAX(*arg, 1));
+		move_to(term.c.x, term.c.y - MAX(*arg, 1));
 		break;
 	case 'B': // CUD -- Cursor <n> Down
 	case 'e': // VPR -- Cursor <n> Down
-		tmoveto(term.c.x, term.c.y + MAX(*arg, 1));
+		move_to(term.c.x, term.c.y + MAX(*arg, 1));
 		break;
 	case 'C': // CUF -- Cursor <n> Forward
 	case 'a': // HPR -- Cursor <n> Forward
-		tmoveto(term.c.x + MAX(*arg, 1), term.c.y);
+		move_to(term.c.x + MAX(*arg, 1), term.c.y);
 		break;
 	case 'D': // CUB -- Cursor <n> Backward
-		tmoveto(term.c.x - MAX(*arg, 1), term.c.y);
+		move_to(term.c.x - MAX(*arg, 1), term.c.y);
 		break;
 	case 'E': // CNL -- Cursor <n> Down and first col
-		tmoveto(0, term.c.y + MAX(*arg, 1));
+		move_to(0, term.c.y + MAX(*arg, 1));
 		break;
 	case 'F': // CPL -- Cursor <n> Up and first col
-		tmoveto(0, term.c.y + MAX(*arg, 1));
+		move_to(0, term.c.y + MAX(*arg, 1));
 		break;
 	case 'G': // CHA -- Move to <col>
 	case '`': // HPA -- Move to <col>
-		tmoveto(*arg - 1, term.c.y);
+		move_to(*arg - 1, term.c.y);
 		break;
 	case 'H': // CUP -- Move to <row> <col>
 	case 'f': // HVP -- Move to <row> <col>
-		tmoveto(arg[1] - 1, arg[0] - 1);
+		move_to(arg[1] - 1, arg[0] - 1);
 		break;
 	case 'I': // CHT -- Cursor Forward Tabulation <n> tab stops
-		tmoveto((term.c.x & ~7) + (MAX(*arg, 1) << 3), term.c.y);
+		move_to((term.c.x & ~7) + (MAX(*arg, 1) << 3), term.c.y);
 		break;
 	case 'J': // ED -- Clear screen
 	case 'K': // EL -- Clear line
@@ -832,14 +818,14 @@ static void handle_csi()
 		tclearregion(term.c.x, term.c.y, term.c.x + *arg - 1, term.c.y);
 		break;
 	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
-		tmoveto((term.c.x & ~7) - (MAX(*arg, 1) << 3), term.c.y);
+		move_to((term.c.x & ~7) - (MAX(*arg, 1) << 3), term.c.y);
 		break;
 	case 'c': // DA -- Device Attributes
 		if (*arg == 0)
-			ttywrite(VTIDEN, sizeof(VTIDEN) - 1);
+			ttywrite("%s", VTIDEN);
 		break;
 	case 'd': // VPA -- Move to <row>
-		tmoveto(term.c.x, *arg - 1);
+		move_to(term.c.x, *arg - 1);
 		break;
 	case 'h': // SM -- Set terminal mode
 	case 'l': // RM -- Reset Mode
@@ -850,11 +836,8 @@ static void handle_csi()
 		for (u32 i = 0; i < nargs; i += set_attr(arg + i));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
-		if (*arg != 6)
-			break;
-		char buf[40];
-		int len = snprintf(buf, sizeof(buf),"\033[%i;%iR", term.c.y + 1, term.c.x + 1);
-		ttywrite(buf, len);
+		if (*arg == 6)
+			ttywrite("\033[%i;%iR", term.c.y + 1, term.c.x + 1);
 		break;
 	case 'p': // DECSTR -- Soft terminal reset
 		memset(&term.c, 0, sizeof(term.c));
@@ -869,8 +852,9 @@ static void handle_csi()
 		arg[1] = arg[1] ? arg[1] : term.row;
 		if (arg[0] >= arg[1] || arg[1] > term.row)
 			break;
-		tsetscroll(arg[0] - 1, arg[1] - 1);
-		tmoveto(0, 0);
+		term.top = arg[0] - 1;
+		term.bot = arg[1] - 1;
+		move_to(0, 0);
 		break;
 	case 's': // DECSC -- Save cursor position
 		term.saved_c[term.alt] = term.c;
@@ -908,7 +892,7 @@ static void handle_esc(u8 ascii)
 		break;
 	case 'D': // IND -- Linefeed
 	case 'E': // NEL -- Next line
-		tnewline(ascii == 'E');
+		newline(ascii == 'E');
 		break;
 	case 'M': // RI -- Reverse index
 		if (term.c.y <= term.top)
@@ -917,7 +901,7 @@ static void handle_esc(u8 ascii)
 			--term.c.y;
 		break;
 	case 'Z': // DECID -- Identify Terminal
-		ttywrite(VTIDEN, sizeof(VTIDEN) - 1);
+		ttywrite("%s", VTIDEN);
 		break;
 	case 'c': // RIS -- Reset to inital state
 		memset(&term, 0, sizeof(term));
@@ -938,18 +922,18 @@ static void handle_control(u8 ascii)
 {
 	switch (ascii) {
 	case '\t':
-		tmoveto((term.c.x & ~7) + 8, term.c.y);
+		move_to((term.c.x & ~7) + 8, term.c.y);
 		break;
 	case '\b':
-		tmoveto(term.c.x - 1, term.c.y);
+		move_to(term.c.x - 1, term.c.y);
 		break;
 	case '\r':
-		tmoveto(0, term.c.y);
+		move_to(0, term.c.y);
 		break;
 	case '\f':
 	case '\v':
 	case '\n':
-		tnewline(false);
+		newline(false);
 		break;
 	case '\033': // ESC
 		handle_esc(ttyread());
@@ -984,9 +968,9 @@ static void tputc(u8 u)
 		memcpy(glyph->u, box_drawing + (u - 'k') * 3, 3);
 
 	if (term.c.x + 1 < term.col)
-		tmoveto(term.c.x + 1, term.c.y);
+		move_to(term.c.x + 1, term.c.y);
 	else
-		tnewline(true);
+		newline(true);
 }
 
 static void __attribute__((noreturn)) run(void)
