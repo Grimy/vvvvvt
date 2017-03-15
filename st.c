@@ -36,6 +36,7 @@
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define TLINE(y)            (term.hist[term.alt ? HIST_SIZE + ((y) + term.scroll) % 64 : ((y) + term.scroll) % HIST_SIZE])
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
+#define pty_printf(...)     dprintf(pty.fd, __VA_ARGS__)
 
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
@@ -50,7 +51,7 @@ typedef uint64_t u64;
 
 enum { SNAP_NONE, SNAP_WORD, SNAP_LINE };
 
-typedef enum {
+enum {
 	ATTR_BOLD       = 1 << 0,
 	ATTR_FAINT      = 1 << 1,
 	ATTR_ITALIC     = 1 << 2,
@@ -60,7 +61,7 @@ typedef enum {
 	ATTR_REVERSE    = 1 << 6,
 	ATTR_INVISIBLE  = 1 << 7,
 	ATTR_STRUCK     = 1 << 8,
-} glyph_attribute;
+};
 
 typedef enum {
 	MOUSE_NONE,
@@ -107,7 +108,7 @@ static struct {
 	char *last;
 	int fd;
 	int: 32;
-} tty;
+} pty;
 
 // Terminal state
 static struct {
@@ -337,10 +338,7 @@ static void draw(void)
 	XCopyArea(xw.dpy, xw.buf, xw.win, xw.gc, 0, 0, xw.w, xw.h, 0, 0);
 }
 
-#define ttywrite(fmt, ...) dprintf(tty.fd, fmt, __VA_ARGS__)
-// #define ttywrite(fmt, ...) do { if (dprintf(tty.fd, fmt, __VA_ARGS__) < 0) die("write error on tty: %s\n", strerror(errno)); } while (0)
-
-static void tclearregion(int x1, int y1, int x2, int y2)
+static void clear_region(int x1, int y1, int x2, int y2)
 {
 	LIMIT(x1, 0, term.col - 1);
 	LIMIT(x2, 0, term.col - 1);
@@ -358,17 +356,28 @@ static void tclearregion(int x1, int y1, int x2, int y2)
 	}
 }
 
-static void move_region(int start, int end, int diff) {
+static void move_region(int start, int diff) {
+	int end = term.bot;
 	int step = diff < 0 ? -1 : 1;
 	if (diff < 0)
 		SWAP(start, end);
 	int last = end - diff + step;
 	for (int y = start; y != last; y += step)
 		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
-	tclearregion(0, MIN(last, end), term.col - 1, MAX(last, end));
+	clear_region(0, MIN(last, end), term.col - 1, MAX(last, end));
 }
 
-static void tscroll(int n)
+static void move_chars(bool forward, int diff) {
+	int dst = term.c.x + (forward ? diff : 0);
+	int src = term.c.x + (forward ? 0 : diff);
+	int size = term.col - (term.c.x + diff);
+	int del = (forward ? term.c.x : term.col - diff);
+	Glyph *line = TLINE(term.c.y);
+	memmove(line + dst, line + src, size * sizeof(Glyph));
+	clear_region(del, term.c.y, del + diff - 1, term.c.y);
+}
+
+static void scroll(int n)
 {
 	if (!term.alt) {
 		term.scroll += n;
@@ -404,7 +413,7 @@ static void xsel(char* opts, bool copy)
 	} else {
 		char sel_buf[BUFSIZ] = { 0 };
 		fread(sel_buf, 1, BUFSIZ, pipe);
-		ttywrite("%s", sel_buf);
+		pty_printf("%s", sel_buf);
 	}
 
 	fclose(pipe);
@@ -435,7 +444,7 @@ static void mousereport(XButtonEvent *e)
 		+ ((e->state & Mod4Mask   ) ? 8  : 0)
 		+ ((e->state & ControlMask) ? 16 : 0);
 
-	ttywrite("\033[M%c%c%c", 32 + button, 33 + x, 33 + y);
+	pty_printf("\033[M%c%c%c", 32 + button, 33 + x, 33 + y);
 }
 
 static char* kmap(KeySym k, u32 state)
@@ -463,21 +472,19 @@ static void swap_screen(void)
 	term.c = term.saved_c[term.alt];
 }
 
-static void newline(bool first_col)
+static void newline()
 {
 	if (term.c.y == term.bot) {
 		if (term.top) {
-			move_region(term.top, term.bot, 1);
+			move_region(term.top, 1);
 		} else {
 			++term.lines;
 			++term.scroll;
-			tclearregion(0, term.bot, term.col - 1, term.row - 1);
+			clear_region(0, term.bot, term.col - 1, term.row - 1);
 		}
 	} else {
 		++term.c.y;
 	}
-	if (first_col)
-		term.c.x = 0;
 }
 
 static void resize(int width, int height)
@@ -500,9 +507,9 @@ static void resize(int width, int height)
 	XftDrawChange(xw.draw, xw.buf);
 	XftDrawRect(xw.draw, colors, 0, 0, xw.w, xw.h);
 
-	// Send our size to the tty driver so that applications can query it
+	// Send our size to the pty driver so that applications can query it
 	struct winsize w = { (u16) term.row, (u16) term.col, 0, 0 };
-	if (ioctl(tty.fd, TIOCSWINSZ, &w) < 0)
+	if (ioctl(pty.fd, TIOCSWINSZ, &w) < 0)
 		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
 }
 
@@ -521,17 +528,17 @@ static void kpress(XEvent *e)
 	if (ksym == XK_Insert && (ev->state & ShiftMask))
 		xsel("xsel -po", false);
 	else if (ksym == XK_Prior && (ev->state & ShiftMask))
-		tscroll(4 - term.row);
+		scroll(4 - term.row);
 	else if (ksym == XK_Next && (ev->state & ShiftMask))
-		tscroll(term.row - 4);
+		scroll(term.row - 4);
 	else if (ksym == XK_C && !((ControlMask | ShiftMask) & ~ev->state))
 		xsel("xsel -bi", true);
 	else if (ksym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
 		xsel("xsel -bo", false);
 	else if (len && *buf != '\b' && *buf != '\x7F')
-		ttywrite("%s", buf);
+		pty_printf("%s", buf);
 	else
-		ttywrite("%s", kmap(ksym, ev->state));
+		pty_printf("%s", kmap(ksym, ev->state));
 }
 
 static void configure_notify(XEvent *e)
@@ -557,7 +564,7 @@ static void focus(XEvent *ev)
 
 	xw.focused = ev->type == FocusIn;
 	if (term.focus)
-		ttywrite("\033[%c", xw.focused ? 'I' : 'O');
+		pty_printf("\033[%c", xw.focused ? 'I' : 'O');
 }
 
 static void bmotion(XEvent *e)
@@ -598,10 +605,10 @@ static void bpress(XEvent *e)
 		selnormalize();
 		break;
 	case Button4:
-		tscroll(-5);
+		scroll(-5);
 		break;
 	case Button5:
-		tscroll(5);
+		scroll(5);
 		break;
 	}
 }
@@ -635,21 +642,21 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[SelectionClear] = selclear,
 };
 
-static char ttyread(void)
+static char pty_getchar(void)
 {
-	if (tty.c >= tty.last) {
-		tty.c = tty.buf;
-		tty.last = tty.buf + read(tty.fd, tty.buf, BUFSIZ);
-		if (tty.last < tty.buf)
+	if (pty.c >= pty.last) {
+		pty.c = pty.buf;
+		pty.last = pty.buf + read(pty.fd, pty.buf, BUFSIZ);
+		if (pty.last < pty.buf)
 			exit(0);
 	}
 
-	return *tty.c++;
+	return *pty.c++;
 }
 
-static void ttynew(void)
+static void pty_new(void)
 {
-	switch (forkpty(&tty.fd, NULL, NULL, &(struct winsize) { 24, 80, 0, 0 })) {
+	switch (forkpty(&pty.fd, NULL, NULL, &(struct winsize) { 24, 80, 0, 0 })) {
 	case -1:
 		die("forkpty failed\n");
 	case 0:
@@ -714,7 +721,7 @@ static void set_mode(bool set, int mode)
 		if (set ^ term.alt)
 			swap_screen();
 		if (set)
-			tclearregion(0, 0, term.col - 1, term.row - 1);
+			clear_region(0, 0, term.col - 1, term.row - 1);
 		break;
 	case MOUSE_BUTTON:
 	case MOUSE_MOTION:
@@ -736,7 +743,7 @@ static void handle_csi()
 	char command = 0;
 
 	csi:
-	switch (command = ttyread()) {
+	switch (command = pty_getchar()) {
 	case '0' ... '9':
 		arg[nargs - 1] = 10 * arg[nargs - 1] + command - '0';
 		goto csi;
@@ -782,7 +789,7 @@ static void handle_csi()
 		break;
 	case 'J': // ED -- Clear screen
 	case 'K': // EL -- Clear line
-		tclearregion(
+		clear_region(
 			*arg ? 0 : term.c.x,
 			*arg && command == 'J' ? 0 : term.c.y,
 			*arg == 1 ? term.c.x : term.col - 1,
@@ -790,39 +797,32 @@ static void handle_csi()
 		break;
 	case 'L': // IL -- Insert <n> blank lines
 	case 'M': // DL -- Delete <n> lines
-		if (!BETWEEN(term.c.y, term.top, term.bot))
-			break;
-		LIMIT(*arg, 1, term.bot);
-		move_region(term.c.y, term.bot, command == 'L' ? -*arg : *arg);
-		term.c.x = 0;
+		if (BETWEEN(term.c.y, term.top, term.bot)) {
+			LIMIT(*arg, 1, term.bot - term.c.y + 1);
+			move_region(term.c.y, command == 'L' ? -*arg : *arg);
+			term.c.x = 0;
+		}
 		break;
 	case 'P': // DCH -- Delete <n> char
 	case '@': // ICH -- Insert <n> blank char
 		LIMIT(*arg, 1, term.col - term.c.x);
-		int dst = term.c.x + (command == '@' ? *arg : 0);
-		int src = term.c.x + (command == '@' ? 0 : *arg);
-		int size = term.col - (term.c.x + *arg);
-		int del = (command == '@' ? term.c.x : term.col - *arg);
-		Glyph *line = TLINE(term.c.y);
-		memmove(line + dst, line + src, size * sizeof(Glyph));
-		tclearregion(del, term.c.y, del + *arg - 1, term.c.y);
+		move_chars(command == '@', *arg);
 		break;
 	case 'S': // SU -- Scroll <n> line up
-		move_region(term.top, term.bot, MAX(*arg, 1));
-		break;
 	case 'T': // SD -- Scroll <n> line down
-		move_region(term.top, term.bot, -MAX(*arg, 1));
+		LIMIT(*arg, 1, term.bot - term.top + 1);
+		move_region(term.top, command == 'T' ? -*arg : *arg);
 		break;
 	case 'X': // ECH -- Erase <n> char
 		LIMIT(*arg, 1, term.col - term.c.x);
-		tclearregion(term.c.x, term.c.y, term.c.x + *arg - 1, term.c.y);
+		clear_region(term.c.x, term.c.y, term.c.x + *arg - 1, term.c.y);
 		break;
 	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
 		move_to((term.c.x & ~7) - (MAX(*arg, 1) << 3), term.c.y);
 		break;
 	case 'c': // DA -- Device Attributes
 		if (*arg == 0)
-			ttywrite("%s", VTIDEN);
+			pty_printf("%s", VTIDEN);
 		break;
 	case 'd': // VPA -- Move to <row>
 		move_to(term.c.x, *arg - 1);
@@ -837,7 +837,7 @@ static void handle_csi()
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 6)
-			ttywrite("\033[%i;%iR", term.c.y + 1, term.c.x + 1);
+			pty_printf("\033[%i;%iR", term.c.y + 1, term.c.x + 1);
 		break;
 	case 'p': // DECSTR -- Soft terminal reset
 		memset(&term.c, 0, sizeof(term.c));
@@ -850,11 +850,11 @@ static void handle_csi()
 	case 'r': // DECSTBM -- Set Scrolling Region
 		arg[0] = arg[0] ? arg[0] : 1;
 		arg[1] = arg[1] ? arg[1] : term.row;
-		if (arg[0] >= arg[1] || arg[1] > term.row)
-			break;
-		term.top = arg[0] - 1;
-		term.bot = arg[1] - 1;
-		move_to(0, 0);
+		if (arg[0] < arg[1] && arg[1] <= term.row) {
+			term.top = arg[0] - 1;
+			term.bot = arg[1] - 1;
+			move_to(0, 0);
+		}
 		break;
 	case 's': // DECSC -- Save cursor position
 		term.saved_c[term.alt] = term.c;
@@ -875,7 +875,7 @@ static void handle_esc(u8 ascii)
 	case '_': // APC -- Application Program Command
 	case '^': // PM -- Privacy Message
 	case ']': // OSC -- Operating System Command
-		while (!IS_CONTROL(ttyread()));
+		while (!IS_CONTROL(pty_getchar()));
 		break;
 	case 'n': // LS2 -- Locking shift 2
 	case 'o': // LS3 -- Locking shift 3
@@ -885,23 +885,26 @@ static void handle_esc(u8 ascii)
 	case ')': // G1D4 -- Set secondary charset G1
 	case '*': // G2D4 -- Set tertiary charset G2
 	case '+': // G3D4 -- Set quaternary charset G3
-		ttyread();
+		pty_getchar();
 		break;
 	case '=': // DECKPAM -- Application keypad (ignored)
 	case '>': // DECKPNM -- Normal keypad (ignored)
 		break;
 	case 'D': // IND -- Linefeed
+		newline();
+		break;
 	case 'E': // NEL -- Next line
-		newline(ascii == 'E');
+		newline();
+		term.c.x = 0;
 		break;
 	case 'M': // RI -- Reverse index
 		if (term.c.y <= term.top)
-			move_region(term.top, term.bot, -1);
+			move_region(term.top, -1);
 		else
 			--term.c.y;
 		break;
 	case 'Z': // DECID -- Identify Terminal
-		ttywrite("%s", VTIDEN);
+		pty_printf("%s", VTIDEN);
 		break;
 	case 'c': // RIS -- Reset to inital state
 		memset(&term, 0, sizeof(term));
@@ -933,10 +936,10 @@ static void handle_control(u8 ascii)
 	case '\f':
 	case '\v':
 	case '\n':
-		newline(false);
+		newline();
 		break;
 	case '\033': // ESC
-		handle_esc(ttyread());
+		handle_esc(pty_getchar());
 		break;
 	case '\016': // LS1 -- Locking shift 1)
 	case '\017': // LS0 -- Locking shift 0)
@@ -967,24 +970,26 @@ static void tputc(u8 u)
 	if (term.charset && BETWEEN(u, 'k', 'y'))
 		memcpy(glyph->u, box_drawing + (u - 'k') * 3, 3);
 
-	if (term.c.x + 1 < term.col)
-		move_to(term.c.x + 1, term.c.y);
-	else
-		newline(true);
+	if (term.c.x + 1 < term.col) {
+		++term.c.x;
+	} else {
+		newline();
+		term.c.x = 0;
+	}
 }
 
 static void __attribute__((noreturn)) run(void)
 {
 	fd_set read_fds;
 	int xfd = XConnectionNumber(xw.dpy);
-	int nfd = MAX(xfd, tty.fd) + 1;
+	int nfd = MAX(xfd, pty.fd) + 1;
 	const struct timespec timeout = { 0, 1000000000 / FPS };
 	bool dirty = true;
 	struct timespec now, last = { 0, 0 };
 
 	for (;;) {
 		FD_ZERO(&read_fds);
-		FD_SET(tty.fd, &read_fds);
+		FD_SET(pty.fd, &read_fds);
 		FD_SET(xfd, &read_fds);
 
 		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
@@ -992,11 +997,11 @@ static void __attribute__((noreturn)) run(void)
 			die("select failed: %s\n", strerror(errno));
 		dirty |= result > 0;
 
-		if (FD_ISSET(tty.fd, &read_fds)) {
+		if (FD_ISSET(pty.fd, &read_fds)) {
 			term.scroll = term.lines;
-			tputc(ttyread());
-			while (tty.c < tty.last)
-				tputc(*tty.c++);
+			tputc(pty_getchar());
+			while (pty.c < pty.last)
+				tputc(*pty.c++);
 		}
 
 		XEvent ev;
@@ -1025,6 +1030,6 @@ int main(int argc, char *argv[])
 	setlocale(LC_CTYPE, "");
 	create_window();
 	load_fonts(FONTNAME);
-	ttynew();
+	pty_new();
 	run();
 }
