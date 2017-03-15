@@ -1014,9 +1014,9 @@ static void tputc(u8 u)
 	p = glyph->u;
 	*p++ = u;
 
-	static const char* vt100_0 = "◆▒␉␌␍␊°X±X␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥πX≠£X·X";
-	if (term.charset && BETWEEN(u, '`', '~'))
-		memcpy(glyph->u, vt100_0 + (u - '`') * 3, 3);
+	static const char* box_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
+	if (term.charset && BETWEEN(u, 'k', 'y'))
+		memcpy(glyph->u, box_drawing + (u - 'k') * 3, 3);
 
 	if (term.c.x + 1 < term.col)
 		tmoveto(term.c.x + 1, term.c.y);
