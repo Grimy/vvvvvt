@@ -770,100 +770,107 @@ static void csihandle()
 	u32 nargs = 1;
 	char command = 0;
 
-	// Parse the sequence
-	while (!BETWEEN(command, '@', '~')) {
-		command = ttyread();
-		if (BETWEEN(command, '0', '9'))
-			arg[nargs - 1] = 10 * arg[nargs - 1] + command - '0';
-		else if (command == ';' && nargs < LEN(arg))
-			++nargs;
-		else if (command == '\030')
-			return;
-	}
-
-	// Argument default values
-	if (!strchr("JKcm", command))
-		arg[0] += !arg[0];
-	if (strchr("ADFTZ", command))
-		arg[0] = -arg[0];
-
-	switch (command) {
+	csi:
+	switch (command = ttyread()) {
+	case '0' ... '9':
+		arg[nargs - 1] = 10 * arg[nargs - 1] + command - '0';
+		goto csi;
+	case ';':
+		++nargs;
+		goto csi;
+	case ' ':
+	case '?':
+	case '!':
+		goto csi;
+	case '\030':
+		break;
 	case 'A': // CUU -- Cursor <n> Up
+		tmoveto(term.c.x, term.c.y - MAX(*arg, 1));
+		break;
 	case 'B': // CUD -- Cursor <n> Down
 	case 'e': // VPR -- Cursor <n> Down
-		tmoveto(term.c.x, term.c.y + arg[0]);
+		tmoveto(term.c.x, term.c.y + MAX(*arg, 1));
 		break;
 	case 'C': // CUF -- Cursor <n> Forward
-	case 'D': // CUB -- Cursor <n> Backward
 	case 'a': // HPR -- Cursor <n> Forward
-		tmoveto(term.c.x + arg[0], term.c.y);
+		tmoveto(term.c.x + MAX(*arg, 1), term.c.y);
+		break;
+	case 'D': // CUB -- Cursor <n> Backward
+		tmoveto(term.c.x - MAX(*arg, 1), term.c.y);
 		break;
 	case 'E': // CNL -- Cursor <n> Down and first col
+		tmoveto(0, term.c.y + MAX(*arg, 1));
+		break;
 	case 'F': // CPL -- Cursor <n> Up and first col
-		tmoveto(0, term.c.y + arg[0]);
+		tmoveto(0, term.c.y + MAX(*arg, 1));
 		break;
 	case 'G': // CHA -- Move to <col>
 	case '`': // HPA -- Move to <col>
-		tmoveto(arg[0] - 1, term.c.y);
+		tmoveto(*arg - 1, term.c.y);
 		break;
 	case 'H': // CUP -- Move to <row> <col>
 	case 'f': // HVP -- Move to <row> <col>
 		tmoveto(arg[1] - 1, arg[0] - 1);
 		break;
 	case 'I': // CHT -- Cursor Forward Tabulation <n> tab stops
-	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
-		tmoveto((term.c.x & ~7) + (arg[0] << 3), term.c.y);
+		tmoveto((term.c.x & ~7) + (MAX(*arg, 1) << 3), term.c.y);
 		break;
 	case 'J': // ED -- Clear screen
 	case 'K': // EL -- Clear line
 		tclearregion(
-			arg[0] ? 0 : term.c.x,
-			arg[0] && command == 'J' ? 0 : term.c.y,
-			arg[0] == 1 ? term.c.x : term.col - 1,
-			arg[0] == 1 || command == 'K' ? term.c.y : term.row - 1);
+			*arg ? 0 : term.c.x,
+			*arg && command == 'J' ? 0 : term.c.y,
+			*arg == 1 ? term.c.x : term.col - 1,
+			*arg == 1 || command == 'K' ? term.c.y : term.row - 1);
 		break;
 	case 'L': // IL -- Insert <n> blank lines
 		if (!BETWEEN(term.c.y, term.top, term.bot))
 			break;
-		LIMIT(arg[0], 1, term.bot);
+		LIMIT(*arg, 1, term.bot);
 
-		for (int y = term.bot - arg[0]; y >= (int) term.c.y; --y)
-			memmove(TLINE(y + arg[0]), TLINE(y), sizeof(*term.hist));
-		tclearregion(0, term.c.y, term.col - 1, term.c.y + arg[0] - 1);
+		for (int y = term.bot - *arg; y >= (int) term.c.y; --y)
+			memmove(TLINE(y + *arg), TLINE(y), sizeof(*term.hist));
+		tclearregion(0, term.c.y, term.col - 1, term.c.y + *arg - 1);
 		break;
 	case 'M': // DL -- Delete <n> lines
 		if (!BETWEEN(term.c.y, term.top, term.bot))
 			break;
-		LIMIT(arg[0], 1, term.bot);
-		for (int y = term.c.y; y + arg[0] <= term.bot; ++y)
-			memmove(TLINE(y), TLINE(y + arg[0]), sizeof(*term.hist));
-		tclearregion(0, term.bot - arg[0] + 1, term.col - 1, term.bot);
+		LIMIT(*arg, 1, term.bot);
+
+		for (int y = term.c.y; y + *arg <= term.bot; ++y)
+			memmove(TLINE(y), TLINE(y + *arg), sizeof(*term.hist));
+		tclearregion(0, term.bot - *arg + 1, term.col - 1, term.bot);
 		break;
 	case 'P': // DCH -- Delete <n> char
 	case '@': // ICH -- Insert <n> blank char
-		LIMIT(arg[0], 1, term.col - term.c.x);
-		int dst = term.c.x + (command == '@' ? arg[0] : 0);
-		int src = term.c.x + (command == '@' ? 0 : arg[0]);
-		int size = term.col - (term.c.x + arg[0]);
-		int del = (command == '@' ? term.c.x : term.col - arg[0]);
+		LIMIT(*arg, 1, term.col - term.c.x);
+		int dst = term.c.x + (command == '@' ? *arg : 0);
+		int src = term.c.x + (command == '@' ? 0 : *arg);
+		int size = term.col - (term.c.x + *arg);
+		int del = (command == '@' ? term.c.x : term.col - *arg);
 		Glyph *line = TLINE(term.c.y);
 		memmove(line + dst, line + src, size * sizeof(Glyph));
-		tclearregion(del, term.c.y, del + arg[0] - 1, term.c.y);
+		tclearregion(del, term.c.y, del + *arg - 1, term.c.y);
 		break;
 	case 'S': // SU -- Scroll <n> line up
+		tscroll(MAX(*arg, 1));
+		break;
 	case 'T': // SD -- Scroll <n> line down
-		tscroll(arg[0]);
+		tscroll(-MAX(*arg, 1));
 		break;
 	case 'X': // ECH -- Erase <n> char
-		LIMIT(arg[0], 1, term.col - term.c.x);
-		tclearregion(term.c.x, term.c.y, term.c.x + arg[0] - 1, term.c.y);
+		LIMIT(*arg, 1, term.col - term.c.x);
+		tclearregion(term.c.x, term.c.y, term.c.x + *arg - 1, term.c.y);
+		break;
+	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
+		tmoveto((term.c.x & ~7) - (MAX(*arg, 1) << 3), term.c.y);
 		break;
 	case 'c': // DA -- Device Attributes
-		if (arg[0] == 0)
+		if (*arg == 0)
 			ttywrite(VTIDEN, sizeof(VTIDEN) - 1);
 		break;
 	case 'd': // VPA -- Move to <row>
-		tmoveto(term.c.x, arg[0] - 1);
+		tmoveto(term.c.x, *arg - 1);
 		break;
 	case 'h': // SM -- Set terminal mode
 	case 'l': // RM -- Reset Mode
@@ -874,7 +881,7 @@ static void csihandle()
 		for (u32 i = 0; i < nargs; i += tsetattr(arg + i));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
-		if (arg[0] != 6)
+		if (*arg != 6)
 			break;
 		char buf[40];
 		int len = snprintf(buf, sizeof(buf),"\033[%i;%iR", term.c.y + 1, term.c.x + 1);
@@ -885,10 +892,11 @@ static void csihandle()
 		term.alt = term.hide = term.focus = term.charset = term.bracket_paste = false;
 		break;
 	case 'q': // DECSCUSR -- Set Cursor Style
-		if (arg[0] <= 6)
-			term.cursor = arg[0];
+		if (*arg <= 6)
+			term.cursor = *arg;
 		break;
 	case 'r': // DECSTBM -- Set Scrolling Region
+		arg[0] = arg[0] ? arg[0] : 1;
 		arg[1] = arg[1] ? arg[1] : term.row;
 		if (arg[0] >= arg[1] || arg[1] > term.row)
 			break;
