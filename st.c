@@ -691,7 +691,7 @@ static void ttynew(void)
 	}
 }
 
-static int tsetattr(int *attr)
+static int set_attr(int *attr)
 {
 	switch (*attr) {
 	case 0:
@@ -732,14 +732,9 @@ static int tsetattr(int *attr)
 	}
 }
 
-static void tsetmode(bool set, int arg)
+static void set_mode(bool set, int mode)
 {
-	switch (arg) {
-	case 1: // DECCKM -- Cursor key (ignored)
-	case 4: // IRM -- Insert Mode (TODO)
-	case 7: // DECAWM -- Auto wrap (ignored)
-	case 12: // SRM -- Send/receive (TODO)
-		break;
+	switch (mode) {
 	case 25: // DECTCEM -- Text Cursor Enable Mode
 		term.hide = !set;
 		break;
@@ -754,7 +749,7 @@ static void tsetmode(bool set, int arg)
 		break;
 	case MOUSE_BUTTON:
 	case MOUSE_MOTION:
-		term.mouse = set * arg;
+		term.mouse = set * mode;
 		break;
 	case 1004: // Report focus events
 		term.focus = set;
@@ -765,7 +760,7 @@ static void tsetmode(bool set, int arg)
 	}
 }
 
-static void csihandle()
+static void handle_csi()
 {
 	int arg[16] = { 0 };
 	u32 nargs = 1;
@@ -866,10 +861,10 @@ static void csihandle()
 	case 'h': // SM -- Set terminal mode
 	case 'l': // RM -- Reset Mode
 		for (u32 i = 0; i < nargs; ++i)
-			tsetmode(command == 'h', arg[i]);
+			set_mode(command == 'h', arg[i]);
 		break;
 	case 'm': // SGR -- Terminal attribute
-		for (u32 i = 0; i < nargs; i += tsetattr(arg + i));
+		for (u32 i = 0; i < nargs; i += set_attr(arg + i));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg != 6)
@@ -903,11 +898,11 @@ static void csihandle()
 	}
 }
 
-static void eschandle(u8 ascii)
+static void handle_esc(u8 ascii)
 {
 	switch (ascii) {
 	case '[':
-		csihandle();
+		handle_csi();
 		break;
 	case 'P': // DCS -- Device Control String
 	case '_': // APC -- Application Program Command
@@ -956,7 +951,7 @@ static void eschandle(u8 ascii)
 	}
 }
 
-static void tcontrolcode(u8 ascii)
+static void handle_control(u8 ascii)
 {
 	switch (ascii) {
 	case '\t':
@@ -974,7 +969,7 @@ static void tcontrolcode(u8 ascii)
 		tnewline(false);
 		break;
 	case '\033': // ESC
-		eschandle(ttyread());
+		handle_esc(ttyread());
 		break;
 	case '\016': // LS1 -- Locking shift 1)
 	case '\017': // LS0 -- Locking shift 0)
@@ -986,7 +981,7 @@ static void tcontrolcode(u8 ascii)
 static void tputc(u8 u)
 {
 	if (IS_CONTROL(u)) {
-		tcontrolcode(u);
+		handle_control(u);
 		return;
 	}
 
