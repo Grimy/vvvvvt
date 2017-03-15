@@ -59,14 +59,6 @@ typedef enum {
 } mouse_mode;
 
 typedef enum {
-	ESC_NONE,
-	ESC_START,
-	ESC_CSI,
-	ESC_STR,
-	ESC_CHARSET,
-} escape_state;
-
-typedef enum {
 	SNAP_WORD = 1,
 	SNAP_LINE = 2
 } selection_snap;
@@ -104,12 +96,6 @@ typedef struct {
 	int y;
 } Point;
 
-// ESC '[' [[ [<priv>] <arg> [;]] <mode> [<mode>]]
-static struct {
-	int arg[16];
-	u32 nargs;
-} csi;
-
 static struct {
 	bool alt;
 	int snap;
@@ -118,6 +104,13 @@ static struct {
 	Point nb; // normalized coordinates of the beginning of the selection
 	Point ne; // normalized coordinates of the end of the selection
 } sel;
+
+static struct {
+	char buf[BUFSIZ];
+	ssize_t len;
+	int i;
+	int fd;
+} tty;
 
 // Terminal state
 static struct {
@@ -130,13 +123,11 @@ static struct {
 	int top;                               // top scroll limit
 	int bot;                               // bottom scroll limit
 	mouse_mode mouse;                      // terminal mode flags
-	escape_state esc;                      // escape state flags
 	int lines;
 	int cursor;                            // cursor style
 	bool alt, hide, focus, charset, bracket_paste;
 } term;
 
-static int ttyfd;
 static char **opt_cmd = (char*[]) { SHELL, NULL };
 
 // Drawing Context
@@ -352,7 +343,7 @@ static void draw(void)
 static void ttywrite(const char *buf, size_t n)
 {
 	while (n > 0) {
-		ssize_t result = write(ttyfd, buf, n);
+		ssize_t result = write(tty.fd, buf, n);
 		if (result < 0)
 			die("write error on tty: %s\n", strerror(errno));
 		n -= result;
@@ -522,7 +513,7 @@ static void resize(int width, int height)
 
 	// Send our size to the tty driver so that applications can query it
 	struct winsize w = { (u16) term.row, (u16) term.col, 0, 0 };
-	if (ioctl(ttyfd, TIOCSWINSZ, &w) < 0)
+	if (ioctl(tty.fd, TIOCSWINSZ, &w) < 0)
 		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
 }
 
@@ -532,6 +523,10 @@ static void kpress(XEvent *e)
 	char buf[8];
 	KeySym ksym;
 	int len = XLookupString(ev, buf, LEN(buf) - 1, &ksym, NULL);
+
+	// Clear the selection
+	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
+		sel.ne.y = -1;
 
 	// Internal shortcuts
 	if (ksym == XK_Insert && (ev->state & ShiftMask))
@@ -654,13 +649,25 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[SelectionClear] = selclear,
 };
 
+static char ttyread(void)
+{
+	if (tty.i >= tty.len) {
+		tty.i = 0;
+		tty.len = read(tty.fd, tty.buf, BUFSIZ);
+		if (tty.len < 0)
+			exit(0);
+	}
+
+	return tty.buf[tty.i++];
+}
+
 static void ttynew(void)
 {
 	int slave;
 	struct winsize w = { (unsigned short) term.row, (unsigned short) term.col, 0, 0 };
 
 	// seems to work fine on linux, openbsd and freebsd
-	if (openpty(&ttyfd, &slave, NULL, NULL, &w) < 0)
+	if (openpty(&tty.fd, &slave, NULL, NULL, &w) < 0)
 		die("openpty failed: %s\n", strerror(errno));
 
 	switch (fork()) {
@@ -674,7 +681,7 @@ static void ttynew(void)
 		if (ioctl(slave, TIOCSCTTY, NULL) < 0)
 			die("ioctl TIOCSCTTY failed: %s\n", strerror(errno));
 		close(slave);
-		close(ttyfd);
+		close(tty.fd);
 		execvp(opt_cmd[0], opt_cmd);
 		die("exec failed: %s\n", strerror(errno));
 	default:
@@ -757,9 +764,22 @@ static void tsetmode(bool set, int arg)
 	}
 }
 
-static void csihandle(char command, int *arg, u32 nargs)
+static void csihandle()
 {
-	term.esc = ESC_NONE;
+	int arg[16] = { 0 };
+	u32 nargs = 1;
+	char command = 0;
+
+	// Parse the sequence
+	while (!BETWEEN(command, '@', '~')) {
+		command = ttyread();
+		if (BETWEEN(command, '0', '9'))
+			arg[nargs - 1] = 10 * arg[nargs - 1] + command - '0';
+		else if (command == ';' && nargs < LEN(arg))
+			++nargs;
+		else if (command == '\030')
+			return;
+	}
 
 	// Argument default values
 	if (!strchr("JKcm", command))
@@ -884,54 +904,56 @@ static void csihandle(char command, int *arg, u32 nargs)
 	}
 }
 
-static escape_state eschandle(u8 ascii)
+static void eschandle(u8 ascii)
 {
 	switch (ascii) {
 	case '[':
-		memset(&csi, 0, sizeof(csi));
-		return ESC_CSI;
+		csihandle();
+		break;
 	case 'P': // DCS -- Device Control String
 	case '_': // APC -- Application Program Command
 	case '^': // PM -- Privacy Message
 	case ']': // OSC -- Operating System Command
-		return ESC_STR;
+		while (!IS_CONTROL(ttyread()));
+		break;
 	case 'n': // LS2 -- Locking shift 2
 	case 'o': // LS3 -- Locking shift 3
 	case '\\': // ST -- String Terminator
-		return ESC_NONE;
+		break;
 	case '(': // GZD4 -- Set primary charset G0
 	case ')': // G1D4 -- Set secondary charset G1
 	case '*': // G2D4 -- Set tertiary charset G2
 	case '+': // G3D4 -- Set quaternary charset G3
-		return ESC_CHARSET;
+		ttyread();
+		break;
 	case '=': // DECKPAM -- Application keypad (ignored)
 	case '>': // DECKPNM -- Normal keypad (ignored)
-		return ESC_NONE;
+		break;
 	case 'D': // IND -- Linefeed
 	case 'E': // NEL -- Next line
 		tnewline(ascii == 'E');
-		return ESC_NONE;
+		break;
 	case 'M': // RI -- Reverse index
 		if (term.c.y <= term.top)
 			tscroll(-1);
 		else
 			--term.c.y;
-		return ESC_NONE;
+		break;
 	case 'Z': // DECID -- Identify Terminal
 		ttywrite(VTIDEN, sizeof(VTIDEN) - 1);
-		return ESC_NONE;
+		break;
 	case 'c': // RIS -- Reset to inital state
 		memset(&term, 0, sizeof(term));
 		resize(xw.w, xw.h);
-		return ESC_NONE;
+		break;
 	case '7': // DECSC -- Save Cursor
 		term.saved_c[term.alt] = term.c;
-		return ESC_NONE;
+		break;
 	case '8': // DECRC -- Restore Cursor
 		term.c = term.saved_c[term.alt];
-		return ESC_NONE;
+		break;
 	default:
-		return ESC_NONE;
+		break;
 	}
 }
 
@@ -953,55 +975,21 @@ static void tcontrolcode(u8 ascii)
 		tnewline(false);
 		break;
 	case '\033': // ESC
-		term.esc = ESC_START;
+		eschandle(ttyread());
 		break;
 	case '\016': // LS1 -- Locking shift 1)
 	case '\017': // LS0 -- Locking shift 0)
 		term.charset = ascii == '\016';
-		break;
-	case '\030': // CAN
-		term.esc = ESC_NONE;
 		break;
 	}
 }
 
 static void tputc(u8 u)
 {
-	// Actions of control codes must be performed as soon they arrive
-	// because they can be embedded inside a control sequence, and
-	// they must not cause conflicts with sequences.
 	if (IS_CONTROL(u)) {
-		if (term.esc == ESC_STR)
-			term.esc = ESC_NONE;
-		else
-			tcontrolcode((char) u);
+		tcontrolcode(u);
 		return;
 	}
-
-	switch (term.esc) {
-	case ESC_START:
-		term.esc = eschandle((char) u);
-		return;
-	case ESC_CSI:
-		if (BETWEEN(u, '0', '9'))
-			csi.arg[csi.nargs] = 10 * csi.arg[csi.nargs] + u - '0';
-		else if (BETWEEN(u, '@', '~'))
-			csihandle((char) u, csi.arg, ++csi.nargs);
-		else if (u == ';' && csi.nargs < LEN(csi.arg) - 1)
-			++csi.nargs;
-		return;
-	case ESC_STR:
-		return;
-	case ESC_CHARSET:
-		term.esc = ESC_NONE;
-		return;
-	}
-
-	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
-		sel.ne.y = -1;
-
-	if (term.c.x >= term.col)
-		tnewline(true);
 
 	static u8 *p;
 	if (IS_CONTINUATION(u) && (int) p & 3) {
@@ -1024,36 +1012,18 @@ static void tputc(u8 u)
 		tnewline(true);
 }
 
-static size_t ttyread(void)
-{
-	static char buf[BUFSIZ];
-
-	ssize_t buf_len = read(ttyfd, buf, BUFSIZ);
-	if (buf_len < 0)
-		exit(0);
-
-	// Reset scroll
-	if (!term.alt)
-		term.scroll = term.lines;
-
-	for (char *ptr = buf; ptr < buf + buf_len; ++ptr)
-		tputc(*ptr);
-
-	return buf_len;
-}
-
 static void __attribute__((noreturn)) run(void)
 {
 	fd_set read_fds;
 	int xfd = XConnectionNumber(xw.dpy);
-	int nfd = MAX(xfd, ttyfd) + 1;
+	int nfd = MAX(xfd, tty.fd) + 1;
 	const struct timespec timeout = { 0, 1000000000 / FPS };
 	bool dirty = true;
 	struct timespec now, last = { 0, 0 };
 
 	for (;;) {
 		FD_ZERO(&read_fds);
-		FD_SET(ttyfd, &read_fds);
+		FD_SET(tty.fd, &read_fds);
 		FD_SET(xfd, &read_fds);
 
 		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
@@ -1063,8 +1033,14 @@ static void __attribute__((noreturn)) run(void)
 
 		dirty |= result > 0;
 
-		if (FD_ISSET(ttyfd, &read_fds))
-			ttyread();
+		if (FD_ISSET(tty.fd, &read_fds)) {
+			if (!term.alt)
+				term.scroll = term.lines;
+
+			tputc(ttyread());
+			while (tty.i < tty.len)
+				tputc(tty.buf[tty.i++]);
+		}
 
 		XEvent ev;
 		while (XPending(xw.dpy)) {
