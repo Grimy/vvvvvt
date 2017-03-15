@@ -760,13 +760,10 @@ static void tsetmode(bool set, int arg)
 static void csihandle(char command, int *arg, u32 nargs)
 {
 	term.esc = ESC_NONE;
-	printf("%c\n", command);
 
 	// Argument default values
-	if (!strchr("JKcm", command)) {
+	if (!strchr("JKcm", command))
 		arg[0] += !arg[0];
-		arg[1] += !arg[1];
-	}
 	if (strchr("ADFTZ", command))
 		arg[0] = -arg[0];
 
@@ -872,7 +869,8 @@ static void csihandle(char command, int *arg, u32 nargs)
 			term.cursor = arg[0];
 		break;
 	case 'r': // DECSTBM -- Set Scrolling Region
-		if (arg[0] >= arg[1] || arg[1] >= term.row)
+		arg[1] = arg[1] ? arg[1] : term.row;
+		if (arg[0] >= arg[1] || arg[1] > term.row)
 			break;
 		tsetscroll(arg[0] - 1, arg[1] - 1);
 		tmoveto(0, 0);
