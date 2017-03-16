@@ -88,7 +88,6 @@ typedef struct {
 } Point;
 
 static struct {
-	bool alt;
 	int snap;
 	Point ob; // original coordinates of the beginning of the selection
 	Point oe; // original coordinates of the end of the selection
@@ -294,7 +293,7 @@ static void draw_glyph(int x, int y)
 	Glyph glyph = TLINE(y)[x];
 
 	// Handle selection and cursor
-	if (sel.alt == term.alt && selected(x, y + term.scroll))
+	if (selected(x, y + term.scroll))
 		glyph.mode ^= ATTR_REVERSE;
 
 	int cursor = term.hide || term.scroll != term.lines ? 0 :
@@ -383,7 +382,7 @@ static void scroll(int n)
 static void getsel(FILE* pipe)
 {
 	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
-		Glyph *line = term.hist[y % HIST_SIZE];
+		Glyph *line = TLINE(y - term.scroll);
 		int x1 = sel.nb.y == y ? sel.nb.x : 0;
 		int x2 = sel.ne.y == y ? sel.ne.x : term.col - 1;
 		int x;
@@ -455,6 +454,7 @@ static void swap_screen(void)
 {
 	static int scroll_save = 0;
 
+	sel.nb.y = -1;
 	term.saved_c[term.alt] = term.c;
 	term.alt = !term.alt;
 	SWAP(scroll_save, term.lines);
@@ -579,7 +579,6 @@ static void bpress(XEvent *e)
 
 	switch (ev->button) {
 	case Button1:
-		sel.alt = term.alt;
 		if (sel.ob.x == point.x && sel.ob.y == point.y) {
 			++sel.snap;
 			selnormalize();

@@ -1,3 +1,1 @@
-* Test CSI P, CSI @
-* Selecting inside Vim doesn’t work
 * Have one struct per screen (base, alt)
