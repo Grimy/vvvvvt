@@ -115,8 +115,8 @@ static struct {
 	int bot;                               // bottom scroll limit
 	int lines;
 	int cursor;                            // cursor style
-	bool report_buttons, report_motion;      // terminal mode flags
-	bool alt, hide, focus, charset, bracket_paste;
+	bool report_buttons, report_motion;
+	bool alt, hide, focus, charset;        // terminal mode flags
 } term;
 
 static char **opt_cmd = (char*[]) { SHELL, NULL };
@@ -166,6 +166,8 @@ static Point ev2point(XButtonEvent *e)
 	LIMIT(y, 0, term.row - 1);
 	return (Point) { x, y + term.scroll };
 }
+
+#define selclear() (sel.ne.y = -1)
 
 static void selsnap(int *x, Glyph *line, int direction)
 {
@@ -340,7 +342,7 @@ static void clear_region(int x1, int y1, int x2, int y2)
 	assert(y1 < y2 || (y1 == y2 && x1 <= x2));
 
 	if (sel.nb.y <= y2 && sel.ne.y >= y1)
-		sel.ne.y = -1;
+		selclear();
 
 	for (int y = y1; y <= y2; y++) {
 		int xstart = y == y1 ? x1 : 0;
@@ -454,7 +456,7 @@ static void swap_screen(void)
 {
 	static int scroll_save = 0;
 
-	sel.nb.y = -1;
+	selclear();
 	term.saved_c[term.alt] = term.c;
 	term.alt = !term.alt;
 	SWAP(scroll_save, term.lines);
@@ -510,9 +512,8 @@ static void kpress(XEvent *e)
 	KeySym ksym;
 	int len = XLookupString(ev, buf, LEN(buf) - 1, &ksym, NULL);
 
-	// Clear the selection
 	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
-		sel.ne.y = -1;
+		selclear();
 
 	// Internal shortcuts
 	if (ksym == XK_Insert && (ev->state & ShiftMask))
@@ -583,8 +584,8 @@ static void bpress(XEvent *e)
 			++sel.snap;
 			selnormalize();
 		} else {
+			selclear();
 			sel.ob = sel.oe = point;
-			sel.ne.y = -1;
 			sel.snap = SNAP_NONE;
 		}
 		break;
@@ -614,11 +615,6 @@ static void brelease(XEvent *e)
 		xsel("xsel -pi", true);
 }
 
-static void selclear(__attribute__((unused)) XEvent *e)
-{
-	sel.ne.y = -1;
-}
-
 static void (*handler[LASTEvent])(XEvent *) = {
 	[KeyPress] = kpress,
 	[ConfigureNotify] = configure_notify,
@@ -628,7 +624,6 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[MotionNotify] = bmotion,
 	[ButtonPress] = bpress,
 	[ButtonRelease] = brelease,
-	[SelectionClear] = selclear,
 };
 
 static char pty_getchar(void)
@@ -719,9 +714,6 @@ static void set_mode(bool set, int mode)
 		break;
 	case 1004: // Report focus events
 		term.focus = set;
-		break;
-	case 2004: // Bracketed paste mode
-		term.bracket_paste = set;
 		break;
 	}
 }
@@ -831,7 +823,9 @@ static void handle_csi()
 		break;
 	case 'p': // DECSTR -- Soft terminal reset
 		memset(&term.c, 0, sizeof(term.c));
-		term.alt = term.hide = term.focus = term.charset = term.bracket_paste = false;
+		term.alt = term.hide = term.focus = term.charset = false;
+		term.top = 0;
+		term.bot = term.row - 1;
 		break;
 	case 'q': // DECSCUSR -- Set Cursor Style
 		if (*arg <= 6)
