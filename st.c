@@ -31,10 +31,11 @@
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
 #define IS_CONTROL(c)       ((c) < 0x20 || (c) == 0x7f)
 #define IS_CONTINUATION(c)  ((c) >> 6 == 2)
-#define IS_DELIM(c)         (strchr(" <>'`\"(){}", (c)) != NULL)
+#define IS_DELIM(c)         (strchr(" <>'`\"(){}", *(c)) != NULL)
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
-#define TLINE(y)            (term.hist[term.alt ? HIST_SIZE + ((y) + term.scroll) % 64 : ((y) + term.scroll) % HIST_SIZE])
+#define SLINE(y)            (term.hist[term.alt ? HIST_SIZE + (y) % 64 : (y) % HIST_SIZE])
+#define TLINE(y)            (SLINE((y) + term.scroll))
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define pty_printf(...)     dprintf(pty.fd, __VA_ARGS__)
 
@@ -169,24 +170,20 @@ static Point ev2point(XButtonEvent *e)
 
 #define selclear() (sel.ne.y = -1)
 
-static void selsnap(int *x, Glyph *line, int direction)
-{
-	if (sel.snap == SNAP_WORD) {
-		while (BETWEEN(*x, 0, term.col - 1) && !IS_DELIM(line[*x].u[0]))
-			*x += direction;
-		*x -= direction;
-	} else if (sel.snap >= SNAP_LINE) {
-		*x = (direction < 0) ? 0 : term.col - 1;
-	}
-}
-
 static void selnormalize(void)
 {
 	bool swapped = AFTER(sel.ob, sel.oe);
 	sel.nb = swapped ? sel.oe : sel.ob;
 	sel.ne = swapped ? sel.ob : sel.oe;
-	selsnap(&sel.nb.x, TLINE(sel.nb.y - term.scroll), -1);
-	selsnap(&sel.ne.x, TLINE(sel.ne.y - term.scroll), +1);
+	if (sel.snap >= SNAP_LINE) {
+		sel.nb.x = 0;
+		sel.ne.x = term.col - 1;
+	} else if (sel.snap == SNAP_WORD) {
+		while (sel.nb.x > 0 && !IS_DELIM(SLINE(sel.nb.y)[sel.nb.x - 1].u))
+			--sel.nb.x;
+		while (!IS_DELIM(SLINE(sel.ne.y)[sel.ne.x + 1].u))
+			++sel.ne.x;
+	}
 }
 
 static bool selected(int x, int y)
@@ -384,7 +381,7 @@ static void scroll(int n)
 static void getsel(FILE* pipe)
 {
 	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
-		Glyph *line = TLINE(y - term.scroll);
+		Glyph *line = SLINE(y);
 		int x1 = sel.nb.y == y ? sel.nb.x : 0;
 		int x2 = sel.ne.y == y ? sel.ne.x : term.col - 1;
 		int x;
