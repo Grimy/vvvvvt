@@ -116,8 +116,9 @@ static struct {
 	int bot;                               // bottom scroll limit
 	int lines;
 	int cursor;                            // cursor style
+	int charset;
 	bool report_buttons, report_motion;
-	bool alt, hide, focus, charset;        // terminal mode flags
+	bool alt, hide, focus, line_drawing;   // terminal mode flags
 } term;
 
 static char **opt_cmd = (char*[]) { SHELL, NULL };
@@ -389,8 +390,16 @@ static void draw_glyph(int x, int y)
 		prev = glyph;
 	}
 
-	for (long i = 0; i < UTF_LEN(*glyph.u); ++i)
-		buf[len++] = MAX(glyph.u[i], ' ');
+	int old_len = len;
+	buf[len++] = *glyph.u ? *glyph.u : ' ';
+	for (long i = 1; i < UTF_LEN(*glyph.u); ++i) {
+		if (!glyph.u[i]) {
+			memcpy(buf + old_len, "⁇", 3);
+			len = old_len + 3;
+			break;
+		}
+		buf[len++] = glyph.u[i];
+	}
 }
 
 // Redraws all glyphs on our buffer, then flushes it to the window.
@@ -855,7 +864,7 @@ static void handle_esc(u8 ascii)
 	case ')': // G1D4 -- Set secondary charset G1
 	case '*': // G2D4 -- Set tertiary charset G2
 	case '+': // G3D4 -- Set quaternary charset G3
-		pty_getchar();
+		term.charset = pty_getchar();
 		break;
 	case '=': // DECKPAM -- Application keypad (ignored)
 	case '>': // DECKPNM -- Normal keypad (ignored)
@@ -889,50 +898,46 @@ static void handle_esc(u8 ascii)
 	}
 }
 
-static void handle_control(u8 ascii)
+static void tputc(const u8 u)
 {
-	switch (ascii) {
+	static u8* p;
+
+	switch (u) {
 	case '\t':
 		move_to((term.c.x & ~7) + 8, term.c.y);
-		break;
+		return;
 	case '\b':
 		move_to(term.c.x - 1, term.c.y);
-		break;
+		return;
 	case '\r':
 		term.c.x = 0;
-		break;
+		return;
 	case '\f':
 	case '\v':
 	case '\n':
 		newline();
-		break;
+		return;
 	case '\033': // ESC
 		handle_esc(pty_getchar());
-		break;
+		return;
 	case '\016': // LS1 -- Locking shift 1)
 	case '\017': // LS0 -- Locking shift 0)
-		term.charset = ascii == '\016';
-		break;
-	}
-}
-
-static void tputc(const u8 u)
-{
-	if (IS_CONTROL(u)) {
-		handle_control(u);
+		term.line_drawing = term.charset == '0' && u == '\016';
+		return;
+	case 128 ... 191: // UTF-8 continuation byte
+		if ((long) p & 3)
+			*p++ = u;
 		return;
 	}
 
 	Glyph *glyph = &TLINE(term.c.y)[term.c.x];
 	*glyph = term.c.attr;
-	glyph->u[0] = u;
-	long utf_len = UTF_LEN(u);
-	for (long i = 1; i < utf_len; ++i)
-		glyph->u[i] = pty_getchar();
+	p = glyph->u;
+	*p++ = u;
 
-	static const char* box_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
-	if (term.charset && BETWEEN(u, 'j', 'x'))
-		memcpy(glyph->u, box_drawing + (u - 'j') * 3, 3);
+	static const char* line_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
+	if (term.line_drawing && BETWEEN(u, 'j', 'x'))
+		memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
 
 	if (term.c.x + 1 < term.col) {
 		++term.c.x;
