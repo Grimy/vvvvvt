@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fontconfig/fontconfig.h>
+#include <locale.h>
 #include <pty.h>
 #include <signal.h>
 #include <stdint.h>
@@ -29,7 +30,7 @@
 #define MAX(a, b)           ((a) < (b) ? (b) : (a))
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
 #define IS_CONTROL(c)       ((c) < 0x20 || (c) == 0x7f)
-#define IS_CONTINUATION(c)  ((c) >> 6 == 2)
+#define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : 4)
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define SLINE(y)            (term.hist[term.alt ? HIST_SIZE + (y) % 64 : (y) % HIST_SIZE])
@@ -388,9 +389,8 @@ static void draw_glyph(int x, int y)
 		prev = glyph;
 	}
 
-	buf[len++] = MAX(glyph.u[0], ' ');
-	for (int i = 1; i < 4 && IS_CONTINUATION(glyph.u[i]); ++i)
-		buf[len++] = glyph.u[i];
+	for (long i = 0; i < UTF_LEN(*glyph.u); ++i)
+		buf[len++] = MAX(glyph.u[i], ' ');
 }
 
 // Redraws all glyphs on our buffer, then flushes it to the window.
@@ -916,23 +916,19 @@ static void handle_control(u8 ascii)
 	}
 }
 
-static void tputc(u8 u)
+static void tputc(const u8 u)
 {
 	if (IS_CONTROL(u)) {
 		handle_control(u);
 		return;
 	}
 
-	static u8 *p;
-	if (IS_CONTINUATION(u) && (int) p & 3) {
-		*p++ = u;
-		return;
-	}
-
 	Glyph *glyph = &TLINE(term.c.y)[term.c.x];
 	*glyph = term.c.attr;
-	p = glyph->u;
-	*p++ = u;
+	glyph->u[0] = u;
+	long utf_len = UTF_LEN(u);
+	for (long i = 1; i < utf_len; ++i)
+		glyph->u[i] = pty_getchar();
 
 	static const char* box_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
 	if (term.charset && BETWEEN(u, 'j', 'x'))
@@ -996,6 +992,7 @@ int main(int argc, char *argv[])
 	term.row = 24;
 	term.col = 80;
 	create_window();
+	setlocale(LC_CTYPE, "");
 	load_fonts(FONTNAME);
 	pty_new();
 	run();
