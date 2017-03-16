@@ -24,13 +24,12 @@
 #include "config.h"
 
 // Macros
+#define LEN(a)              (sizeof(a) / sizeof(*(a)))
 #define MIN(a, b)           ((a) > (b) ? (b) : (a))
 #define MAX(a, b)           ((a) < (b) ? (b) : (a))
-#define LEN(a)              (sizeof(a) / sizeof(*(a)))
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
 #define IS_CONTROL(c)       ((c) < 0x20 || (c) == 0x7f)
 #define IS_CONTINUATION(c)  ((c) >> 6 == 2)
-#define IS_DELIM(c)         (strchr(" <>'`\"(){}", *(c)) != NULL)
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define SLINE(y)            (term.hist[term.alt ? HIST_SIZE + (y) % 64 : (y) % HIST_SIZE])
@@ -38,6 +37,7 @@
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define pty_printf(...)     dprintf(pty.fd, __VA_ARGS__)
 
+#define IS_DELIM(c)         (strchr(" <>'`\"(){}", *(c)) != NULL)
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 
@@ -121,6 +121,80 @@ static struct {
 
 static char **opt_cmd = (char*[]) { SHELL, NULL };
 
+#define selclear() (sel.ne.y = -1)
+
+static void clear_region(int x1, int y1, int x2, int y2)
+{
+	LIMIT(x1, 0, term.col - 1);
+	LIMIT(x2, 0, term.col - 1);
+	LIMIT(y1, 0, term.row - 1);
+	LIMIT(y2, 0, term.row - 1);
+	assert(y1 < y2 || (y1 == y2 && x1 <= x2));
+
+	if (sel.nb.y <= y2 && sel.ne.y >= y1)
+		selclear();
+
+	for (int y = y1; y <= y2; y++) {
+		int xstart = y == y1 ? x1 : 0;
+		int xend = y == y2 ? x2 : term.col - 1;
+		memset(TLINE(y) + xstart, 0, (xend - xstart + 1) * sizeof(Glyph));
+	}
+}
+
+static void move_region(int start, int diff) {
+	int end = term.bot;
+	int step = diff < 0 ? -1 : 1;
+	if (diff < 0)
+		SWAP(start, end);
+	int last = end - diff + step;
+	for (int y = start; y != last; y += step)
+		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
+	clear_region(0, MIN(last, end), term.col - 1, MAX(last, end));
+}
+
+static void move_chars(bool forward, int diff) {
+	int dst = term.c.x + (forward ? diff : 0);
+	int src = term.c.x + (forward ? 0 : diff);
+	int size = term.col - (term.c.x + diff);
+	int del = (forward ? term.c.x : term.col - diff);
+	Glyph *line = TLINE(term.c.y);
+	memmove(line + dst, line + src, size * sizeof(Glyph));
+	clear_region(del, term.c.y, del + diff - 1, term.c.y);
+}
+
+static void move_to(int x, int y)
+{
+	term.c.x = LIMIT(x, 0, term.col - 1);
+	term.c.y = LIMIT(y, 0, term.row - 1);
+}
+
+static void swap_screen(void)
+{
+	static int scroll_save = 0;
+
+	selclear();
+	term.saved_c[term.alt] = term.c;
+	term.alt = !term.alt;
+	SWAP(scroll_save, term.lines);
+	term.scroll = term.lines;
+	term.c = term.saved_c[term.alt];
+}
+
+static void newline()
+{
+	if (term.c.y == term.bot) {
+		if (term.top) {
+			move_region(term.top, 1);
+		} else {
+			++term.lines;
+			++term.scroll;
+			clear_region(0, term.bot, term.col - 1, term.row - 1);
+		}
+	} else {
+		++term.c.y;
+	}
+}
+
 // Drawing Context
 static struct {
 	Display *dpy;
@@ -158,6 +232,14 @@ static Key key[] = {
 	{ XK_Next,          0,            "\033[6~"   },
 };
 
+static void scroll(int n)
+{
+	if (!term.alt) {
+		term.scroll += n;
+		LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + term.row), term.lines);
+	}
+}
+
 static Point ev2point(XButtonEvent *e)
 {
 	int x = (e->x - BORDERPX) / xw.cw;
@@ -166,8 +248,6 @@ static Point ev2point(XButtonEvent *e)
 	LIMIT(y, 0, term.row - 1);
 	return (Point) { x, y + term.scroll };
 }
-
-#define selclear() (sel.ne.y = -1)
 
 static void selnormalize(void)
 {
@@ -252,7 +332,7 @@ static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 	bool bold = (glyph.mode & ATTR_BOLD) != 0;
 	bool italic = (glyph.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = xw.font[bold + 2 * italic];
-	const XftColor *fg = &colors[glyph.fg && glyph.fg != glyph.bg ? glyph.fg : DEFAULTFG];
+	const XftColor *fg = &colors[glyph.fg ? glyph.fg : DEFAULTFG];
 	const XftColor *bg = &colors[glyph.bg];
 	int baseline = y + font->ascent;
 	int width = xw.cw * len;
@@ -326,53 +406,6 @@ static void draw(void)
 	XCopyArea(xw.dpy, xw.pixmap, xw.win, xw.gc, 0, 0, xw.width, xw.height, 0, 0);
 }
 
-static void clear_region(int x1, int y1, int x2, int y2)
-{
-	LIMIT(x1, 0, term.col - 1);
-	LIMIT(x2, 0, term.col - 1);
-	LIMIT(y1, 0, term.row - 1);
-	LIMIT(y2, 0, term.row - 1);
-	assert(y1 < y2 || (y1 == y2 && x1 <= x2));
-
-	if (sel.nb.y <= y2 && sel.ne.y >= y1)
-		selclear();
-
-	for (int y = y1; y <= y2; y++) {
-		int xstart = y == y1 ? x1 : 0;
-		int xend = y == y2 ? x2 : term.col - 1;
-		memset(TLINE(y) + xstart, 0, (xend - xstart + 1) * sizeof(Glyph));
-	}
-}
-
-static void move_region(int start, int diff) {
-	int end = term.bot;
-	int step = diff < 0 ? -1 : 1;
-	if (diff < 0)
-		SWAP(start, end);
-	int last = end - diff + step;
-	for (int y = start; y != last; y += step)
-		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
-	clear_region(0, MIN(last, end), term.col - 1, MAX(last, end));
-}
-
-static void move_chars(bool forward, int diff) {
-	int dst = term.c.x + (forward ? diff : 0);
-	int src = term.c.x + (forward ? 0 : diff);
-	int size = term.col - (term.c.x + diff);
-	int del = (forward ? term.c.x : term.col - diff);
-	Glyph *line = TLINE(term.c.y);
-	memmove(line + dst, line + src, size * sizeof(Glyph));
-	clear_region(del, term.c.y, del + diff - 1, term.c.y);
-}
-
-static void scroll(int n)
-{
-	if (!term.alt) {
-		term.scroll += n;
-		LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + term.row), term.lines);
-	}
-}
-
 // append every set & selected glyph to the selection
 static void getsel(FILE* pipe)
 {
@@ -437,39 +470,6 @@ static char* kmap(KeySym k, u32 state)
 		if (kp->k == k && !(kp->mask & ~state))
 			return kp->s;
 	return "";
-}
-
-static void move_to(int x, int y)
-{
-	term.c.x = LIMIT(x, 0, term.col - 1);
-	term.c.y = LIMIT(y, 0, term.row - 1);
-}
-
-static void swap_screen(void)
-{
-	static int scroll_save = 0;
-
-	selclear();
-	term.saved_c[term.alt] = term.c;
-	term.alt = !term.alt;
-	SWAP(scroll_save, term.lines);
-	term.scroll = term.lines;
-	term.c = term.saved_c[term.alt];
-}
-
-static void newline()
-{
-	if (term.c.y == term.bot) {
-		if (term.top) {
-			move_region(term.top, 1);
-		} else {
-			++term.lines;
-			++term.scroll;
-			clear_region(0, term.bot, term.col - 1, term.row - 1);
-		}
-	} else {
-		++term.c.y;
-	}
 }
 
 static void resize(int width, int height)
@@ -714,23 +714,22 @@ static void set_mode(bool set, int mode)
 static void handle_csi()
 {
 	int arg[16] = { 0 };
-	u32 nargs = 1;
+	u32 nargs = 0;
 	char command = 0;
 
 	csi:
 	switch (command = pty_getchar()) {
 	case '0' ... '9':
-		arg[nargs - 1] = 10 * arg[nargs - 1] + command - '0';
+		if (arg[nargs] < 10000)
+			arg[nargs] = 10 * arg[nargs] + command - '0';
 		goto csi;
 	case ';':
-		++nargs;
+		nargs = MIN(nargs + 1, LEN(arg) - 1);
 		goto csi;
 	case ' ':
 	case '?':
 	case '!':
 		goto csi;
-	case '\030':
-		break;
 	case 'A': // CUU -- Cursor <n> Up
 		move_to(term.c.x, term.c.y - MAX(*arg, 1));
 		break;
@@ -804,11 +803,11 @@ static void handle_csi()
 		break;
 	case 'h': // SM -- Set terminal mode
 	case 'l': // RM -- Reset Mode
-		for (u32 i = 0; i < nargs; ++i)
+		for (u32 i = 0; i <= nargs; ++i)
 			set_mode(command == 'h', arg[i]);
 		break;
 	case 'm': // SGR -- Terminal attribute
-		for (u32 i = 0; i < nargs; i += set_attr(arg + i));
+		for (u32 i = 0; i <= nargs; i += set_attr(arg + i));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 6)
@@ -826,8 +825,8 @@ static void handle_csi()
 		break;
 	case 'r': // DECSTBM -- Set Scrolling Region
 		arg[0] = arg[0] ? arg[0] : 1;
-		arg[1] = arg[1] ? arg[1] : term.row;
-		if (arg[0] < arg[1] && arg[1] <= term.row) {
+		arg[1] = arg[1] && arg[1] < term.row ? arg[1] : term.row;
+		if (arg[0] < arg[1]) {
 			term.top = arg[0] - 1;
 			term.bot = arg[1] - 1;
 			move_to(0, 0);
@@ -961,8 +960,8 @@ static void __attribute__((noreturn)) run(void)
 	int xfd = XConnectionNumber(xw.dpy);
 	int nfd = MAX(xfd, pty.fd) + 1;
 	const struct timespec timeout = { 0, 1000000000 / FPS };
-	bool dirty = true;
 	struct timespec now, last = { 0, 0 };
+	bool dirty = true;
 
 	for (;;) {
 		FD_ZERO(&read_fds);
