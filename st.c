@@ -646,6 +646,12 @@ static void pty_new(void)
 
 static int set_attr(int *attr)
 {
+	u8 *color = &term.c.attr.fg;
+	if (BETWEEN(*attr, 40, 49) || BETWEEN(*attr, 100, 107)) {
+		color = &term.c.attr.bg;
+		*attr -= 10;
+	}
+
 	switch (*attr) {
 	case 0:
 		memset(&term.c.attr, 0, sizeof(term.c.attr));
@@ -657,28 +663,16 @@ static int set_attr(int *attr)
 		term.c.attr.mode &= ~(1 << (*attr - 21));
 		return 1;
 	case 30 ... 37:
-		term.c.attr.fg = (u8) (*attr - 30);
+		*color = (u8) (*attr - 30);
 		return 1;
 	case 38:
-		term.c.attr.fg = (u8) attr[2];
+		*color = (u8) attr[2];
 		return 3;
 	case 39:
-		term.c.attr.fg = 0;
-		return 1;
-	case 40 ... 47:
-		term.c.attr.bg = (u8) (*attr - 40);
-		return 1;
-	case 48:
-		term.c.attr.bg = (u8) attr[2];
-		return 3;
-	case 49:
-		term.c.attr.bg = 0;
+		*color = 0;
 		return 1;
 	case 90 ... 97:
-		term.c.attr.fg = (u8) (*attr - 90 + 8);
-		return 1;
-	case 100 ... 107:
-		term.c.attr.bg = (u8) (*attr - 100 + 8);
+		*color = (u8) (*attr - 90 + 8);
 		return 1;
 	default:
 		return 1;
@@ -892,8 +886,6 @@ static void handle_esc(u8 ascii)
 	case '8': // DECRC -- Restore Cursor
 		term.c = term.saved_c[term.alt];
 		break;
-	default:
-		break;
 	}
 }
 
@@ -907,7 +899,7 @@ static void handle_control(u8 ascii)
 		move_to(term.c.x - 1, term.c.y);
 		break;
 	case '\r':
-		move_to(0, term.c.y);
+		term.c.x = 0;
 		break;
 	case '\f':
 	case '\v':
