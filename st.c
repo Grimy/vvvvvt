@@ -944,8 +944,8 @@ static void tputc(u8 u)
 	*p++ = u;
 
 	static const char* box_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
-	if (term.charset && BETWEEN(u, 'k', 'y'))
-		memcpy(glyph->u, box_drawing + (u - 'k') * 3, 3);
+	if (term.charset && BETWEEN(u, 'j', 'x'))
+		memcpy(glyph->u, box_drawing + (u - 'j') * 3, 3);
 
 	if (term.c.x + 1 < term.col) {
 		++term.c.x;
