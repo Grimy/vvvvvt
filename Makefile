@@ -24,7 +24,7 @@ st-fuzz: st.c colors.c config.h Makefile
 	@echo CC $@
 	afl-clang $(CFLAGS) $(LDFLAGS) $< -o $@
 
-colors.c: husl.pl
+colors.c: colors.pl
 	./$^ > $@
 
 fuzz: st-fuzz

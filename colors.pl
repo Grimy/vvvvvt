@@ -3,9 +3,8 @@
 use strict;
 use Convert::Color::HUSL;
 
-sub hsl2rgb   { [ map 65536 * $_, Convert::Color::HUSL->new(@$_)->rgb ] }
+sub hsl2rgb   { [ map 65535 * $_, Convert::Color::HUSL->new(@$_)->rgb ] }
 sub sixd2rgb  { $_ ? 257 * (55 + 40 * $_) : 0 }
-sub grayscale { [(257 * (8 + 10 * $_)) x 3] }
 
 print "static const XftColor colors[] = {\n";
 
@@ -18,8 +17,8 @@ map(hsl2rgb,
 	[210, 99, 61],   # Azure   --
 	[330, 99, 61],   # Pink    --
 	[150, 99, 61],   # Spring  --
-	[300, 11, 16],   # Dark    Cursorline
-	[240, 11, 61],   # Gray    Comments
+	[240, 11, 51],   # Gray    Comments
+	[270, 11, 61],   # Gray    --
 	[ 30, 99, 61],   # Orange  Todo
 	[120, 99, 81],   # Green   Menus
 	[ 60, 99, 81],   # Yellow  Keywords
@@ -28,7 +27,7 @@ map(hsl2rgb,
 	[180, 99, 81],   # Cyan    --
 	[300, 11, 96],   # White   Foreground
 ),
-map([map sixd2rgb, $_ / 36 % 6, $_ / 6 % 6, $_ % 6], 0..216),
-map(grayscale, 0..24);
+map([map sixd2rgb, $_ / 36 % 6, $_ / 6 % 6, $_ % 6], 0..215),
+map(hsl2rgb, map [300, 11, 12 + 3.5 * $_], 0..23);
 
 print "};\n";
