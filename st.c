@@ -9,7 +9,6 @@
 #include <assert.h>
 #include <errno.h>
 #include <fontconfig/fontconfig.h>
-#include <locale.h>
 #include <pty.h>
 #include <signal.h>
 #include <stdint.h>
@@ -127,10 +126,10 @@ static struct {
 	Display *dpy;
 	Window win;
 	XftFont *font[4];
-	Drawable buf;
+	Drawable pixmap;
 	GC gc;
 	XftDraw *draw;
-	int w, h;     // window width and height
+	int width, height;
 	int ch, cw;   // character width and height
 	bool visible;
 	bool focused;
@@ -222,31 +221,28 @@ static void create_window(void)
 		die("Can't open display\n");
 
 	// Set geometry to some arbitrary values while we wait for the resize event
-	xw.w = term.col * xw.cw + 2 * BORDERPX;
-	xw.h = term.row * xw.ch + 2 * BORDERPX;
+	xw.width = term.col * xw.cw + 2 * BORDERPX;
+	xw.height = term.row * xw.ch + 2 * BORDERPX;
 
 	// Events
-	Visual *visual = XDefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
+	Visual *visual = DefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
 	XSetWindowAttributes attrs = {
-		.background_pixel = colors->pixel,
 		.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask
 			| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask,
 	};
 
 	Window parent = XRootWindow(xw.dpy, DefaultScreen(xw.dpy));
-	xw.win = XCreateWindow(xw.dpy, parent, 0, 0, xw.w, xw.h, 0,
-			CopyFromParent, InputOutput, visual,
-			CWBackPixel | CWEventMask, &attrs);
+	xw.win = XCreateWindow(xw.dpy, parent, 0, 0, xw.width, xw.height, 0,
+			CopyFromParent, InputOutput, visual, CWEventMask, &attrs);
 
 	// Graphic context
 	XGCValues gcvalues = { .graphics_exposures = False };
 	xw.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures, &gcvalues);
-	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, DefaultScreen(xw.dpy)));
-	xw.draw = XftDrawCreate(xw.dpy, xw.buf, visual, CopyFromParent);
+	xw.pixmap = XCreatePixmap(xw.dpy, xw.win, xw.width, xw.height, 24);
+	xw.draw = XftDrawCreate(xw.dpy, xw.pixmap, visual, CopyFromParent);
 	XDefineCursor(xw.dpy, xw.win, XCreateFontCursor(xw.dpy, XC_xterm));
 
 	// Various
-	XSetLocaleModifiers("");
 	XMapWindow(xw.dpy, xw.win);
 	XStoreName(xw.dpy, xw.win, "st");
 }
@@ -320,14 +316,14 @@ static void draw_glyph(int x, int y)
 // Redraws all glyphs on our buffer, then flushes it to the window.
 static void draw(void)
 {
-	XftDrawRect(xw.draw, colors, 0, 0, xw.w, xw.h);
+	XftDrawRect(xw.draw, colors, 0, 0, xw.width, xw.height);
 
 	for (int y = 0; y < term.row; ++y)
 		for (int x = 0; x < term.col; ++x)
 			draw_glyph(x, y);
 	draw_glyph(0, 0);
 
-	XCopyArea(xw.dpy, xw.buf, xw.win, xw.gc, 0, 0, xw.w, xw.h, 0, 0);
+	XCopyArea(xw.dpy, xw.pixmap, xw.win, xw.gc, 0, 0, xw.width, xw.height, 0, 0);
 }
 
 static void clear_region(int x1, int y1, int x2, int y2)
@@ -489,12 +485,12 @@ static void resize(int width, int height)
 	move_to(term.c.x, term.c.y);
 
 	// Update X window data
-	xw.w = width;
-	xw.h = height;
-	XFreePixmap(xw.dpy, xw.buf);
-	xw.buf = XCreatePixmap(xw.dpy, xw.win, xw.w, xw.h, DefaultDepth(xw.dpy, DefaultScreen(xw.dpy)));
-	XftDrawChange(xw.draw, xw.buf);
-	XftDrawRect(xw.draw, colors, 0, 0, xw.w, xw.h);
+	xw.width = width;
+	xw.height = height;
+	XFreePixmap(xw.dpy, xw.pixmap);
+	xw.pixmap = XCreatePixmap(xw.dpy, xw.win, width, height, 24);
+	XftDrawChange(xw.draw, xw.pixmap);
+	XftDrawRect(xw.draw, colors, 0, 0, width, height);
 
 	// Send our size to the pty driver so that applications can query it
 	struct winsize w = { (u16) term.row, (u16) term.col, 0, 0 };
@@ -533,7 +529,7 @@ static void configure_notify(XEvent *e)
 {
 	XConfigureEvent *ev = &e->xconfigure;
 
-	if (ev->width != xw.w || ev->height != xw.h)
+	if (ev->width != xw.width || ev->height != xw.height)
 		resize(ev->width, ev->height);
 }
 
@@ -889,7 +885,7 @@ static void handle_esc(u8 ascii)
 		break;
 	case 'c': // RIS -- Reset to inital state
 		memset(&term, 0, sizeof(term));
-		resize(xw.w, xw.h);
+		resize(xw.width, xw.height);
 		break;
 	case '7': // DECSC -- Save Cursor
 		term.saved_c[term.alt] = term.c;
@@ -1008,7 +1004,6 @@ int main(int argc, char *argv[])
 
 	term.row = 24;
 	term.col = 80;
-	setlocale(LC_CTYPE, "");
 	create_window();
 	load_fonts(FONTNAME);
 	pty_new();
