@@ -33,7 +33,7 @@
 #define UTF_LEN(c)          ((c) < 0x80 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : 4)
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
-#define SLINE(y)            (term.hist[term.alt ? HIST_SIZE + (y) % 64 : (y) % HIST_SIZE])
+#define SLINE(y)            (term.hist[(y) % HIST_SIZE])
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define pty_printf(...)     dprintf(pty.fd, __VA_ARGS__)
@@ -106,19 +106,19 @@ static struct {
 
 // Terminal state
 static struct {
-	int row;                               // row count
-	int col;                               // column count
-	Glyph hist[HIST_SIZE + 64][LINE_SIZE]; // history buffer
-	TCursor c;                             // cursor
-	TCursor saved_c[2];                    // saved cursors
-	int scroll;                            // current scroll position
-	int top;                               // top scroll limit
-	int bot;                               // bottom scroll limit
+	int row;                              // row count
+	int col;                              // column count
+	Glyph hist[HIST_SIZE][LINE_SIZE];     // history buffer
+	TCursor c;                            // cursor
+	TCursor saved_c[2];                   // saved cursors
+	int scroll;                           // current scroll position
+	int top;                              // top scroll limit
+	int bot;                              // bottom scroll limit
 	int lines;
-	int cursor;                            // cursor style
+	int cursor;                           // cursor style
 	u8 charset[4];
 	bool report_buttons, report_motion;
-	bool alt, hide, focus, line_drawing;   // terminal mode flags
+	bool alt, hide, focus, line_drawing;  // terminal mode flags
 } term;
 
 static char **opt_cmd = (char*[]) { SHELL, NULL };
@@ -177,7 +177,12 @@ static void swap_screen(void)
 	selclear();
 	term.saved_c[term.alt] = term.c;
 	term.alt = !term.alt;
-	SWAP(scroll_save, term.lines);
+	if (term.alt) {
+		scroll_save = term.lines;
+		term.lines += term.row;
+	} else {
+		term.lines = scroll_save;
+	}
 	term.scroll = term.lines;
 	term.c = term.saved_c[term.alt];
 }
