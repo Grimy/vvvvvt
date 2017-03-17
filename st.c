@@ -452,26 +452,23 @@ static void xsel(char* opts, bool copy)
 
 static void mousereport(XButtonEvent *e)
 {
-	static int ox, oy;
+	static Point prev;
+	Point pos = ev2point(e);
 
-	Point point = ev2point(e);
-	int x = point.x, y = point.y - term.scroll;
+	if (pos.x > 255 || pos.y > 255)
+		return;
+
+	if (e->type == MotionNotify && pos.x == prev.x && pos.y == prev.y)
+		return;
+
+	prev = pos;
+
 	int button = e->type == ButtonRelease ? 3 : e->button - Button1;
+	button += (e->state & ShiftMask  ) ? 4  : 0;
+	button += (e->state & Mod4Mask   ) ? 8  : 0;
+	button += (e->state & ControlMask) ? 16 : 0;
 
-	if (x > 222 || y > 222)
-		return;
-
-	if (e->type == MotionNotify && x == ox && y == oy)
-		return;
-
-	ox = x;
-	oy = y;
-
-	button += ((e->state & ShiftMask  ) ? 4  : 0)
-		+ ((e->state & Mod4Mask   ) ? 8  : 0)
-		+ ((e->state & ControlMask) ? 16 : 0);
-
-	pty_printf("\033[M%c%c%c", 32 + button, 33 + x, 33 + y);
+	pty_printf("\033[M%c%c%c", 32 + button, 33 + pos.x, 33 + pos.y - term.scroll);
 }
 
 static char* kmap(KeySym k, u32 state)
