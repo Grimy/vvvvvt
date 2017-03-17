@@ -184,16 +184,14 @@ static void swap_screen(void)
 
 static void newline()
 {
-	if (term.c.y == term.bot) {
-		if (term.top) {
-			move_region(term.top, 1);
-		} else {
-			++term.lines;
-			++term.scroll;
-			clear_region(0, term.bot, term.col - 1, term.row - 1);
-		}
-	} else {
+	if (term.c.y != term.bot) {
 		++term.c.y;
+	} else if (term.top) {
+		move_region(term.top, 1);
+	} else {
+		++term.lines;
+		++term.scroll;
+		clear_region(0, term.bot, term.col - 1, term.row - 1);
 	}
 }
 
@@ -224,7 +222,7 @@ static Key key[] = {
 	{ XK_Left,          0,            "\033OD"    },
 	{ XK_ISO_Left_Tab,  0,            "\033[Z"    },
 	{ XK_BackSpace,     ControlMask,  "\027"      },
-	{ XK_BackSpace,     0,            "\x7F"      },
+	{ XK_BackSpace,     0,            "\177"      },
 	{ XK_Home,          0,            "\033[1~"   },
 	{ XK_Insert,        0,            "\033[2~"   },
 	{ XK_Delete,        ControlMask,  "\033[3;5~" },
@@ -528,7 +526,7 @@ static void kpress(XEvent *e)
 		xsel("xsel -bi", true);
 	else if (ksym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
 		xsel("xsel -bo", false);
-	else if (len && *buf != '\b' && *buf != '\x7F')
+	else if (len && *buf != '\b' && *buf != '\177')
 		pty_printf("%s", buf);
 	else
 		pty_printf("%s", kmap(ksym, ev->state));
@@ -796,9 +794,6 @@ static void handle_csi()
 	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
 		move_to((term.c.x & ~7) - (MAX(*arg, 1) << 3), term.c.y);
 		break;
-	case 'b': // REP -- Repeat the preceding graphic character <n> times
-		// TODO
-		break;
 	case 'c': // DA -- Device Attributes
 		if (*arg == 0)
 			pty_printf("%s", VTIDEN);
@@ -884,7 +879,9 @@ static void handle_esc(u8 ascii)
 static void tputc(u8 u)
 {
 	static const char* line_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
-	Glyph *glyph;
+	static long i;
+	static long utf_len;
+	static Glyph *glyph;
 
 	switch (u) {
 	case '\b':
@@ -899,40 +896,35 @@ static void tputc(u8 u)
 	case '\r':
 		term.c.x = 0;
 		return;
-	case 14: // LS1 -- Locking shift 1
-	case 15: // LS0 -- Locking shift 0
+	case '\016': // LS1 -- Locking shift 1
+	case '\017': // LS0 -- Locking shift 0
 		term.line_drawing = term.charset == '0' && u == '\016';
 		return;
-	case 27: // ESC
+	case '\033': // ESC
 		handle_esc(pty_getchar());
 		return;
-	case ' ' ... 255:
+	case 128 ... 191:
+		if (i < utf_len) {
+			glyph->u[i++] = u;
+			return;
+		}
+		// FALLTHROUGH
+	case ' ' ... '~':
+	case 192 ... 255:
 		glyph = &TLINE(term.c.y)[term.c.x];
 		*glyph = term.c.attr;
 		glyph->u[0] = u;
-
-		if (term.c.x + 1 < term.col) {
-			++term.c.x;
-		} else {
-			newline();
-			term.c.x = 0;
-		}
-
-		int utf_len = UTF_LEN(u);
-		for (int i = 1; i < utf_len; ++i) {
-			u = pty_getchar();
-			if (BETWEEN(u, 128, 191)) {
-				glyph->u[i] = u;
-			} else {
-				tputc(u);
-				return;
-			}
-		}
+		utf_len = UTF_LEN(u);
+		i = 1;
 
 		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
 			memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
 
-		break;
+		++term.c.x;
+		if (term.c.x == term.col) {
+			newline();
+			term.c.x = 0;
+		}
 	}
 }
 
