@@ -847,30 +847,14 @@ static void handle_csi()
 static void handle_esc(u8 ascii)
 {
 	switch (ascii) {
-	case '[':
+	case '[': // CSI -- Control Sequence Introducer
 		handle_csi();
 		break;
-	case 'P': // DCS -- Device Control String
-	case '_': // APC -- Application Program Command
-	case '^': // PM -- Privacy Message
 	case ']': // OSC -- Operating System Command
 		while (!IS_CONTROL(pty_getchar()));
 		break;
-	case 'n': // LS2 -- Locking shift 2
-	case 'o': // LS3 -- Locking shift 3
-	case '\\': // ST -- String Terminator
-		break;
-	case '(': // GZD4 -- Set primary charset G0
 	case ')': // G1D4 -- Set secondary charset G1
-	case '*': // G2D4 -- Set tertiary charset G2
-	case '+': // G3D4 -- Set quaternary charset G3
 		term.charset = pty_getchar();
-		break;
-	case '=': // DECKPAM -- Application keypad (ignored)
-	case '>': // DECKPNM -- Normal keypad (ignored)
-		break;
-	case 'D': // IND -- Linefeed
-		newline();
 		break;
 	case 'E': // NEL -- Next line
 		newline();
@@ -881,9 +865,6 @@ static void handle_esc(u8 ascii)
 			move_region(term.top, -1);
 		else
 			--term.c.y;
-		break;
-	case 'Z': // DECID -- Identify Terminal
-		pty_printf("%s", VTIDEN);
 		break;
 	case 'c': // RIS -- Reset to inital state
 		memset(&term, 0, sizeof(term));
@@ -920,14 +901,15 @@ static void tputc(const u8 u)
 	case '\033': // ESC
 		handle_esc(pty_getchar());
 		return;
-	case '\016': // LS1 -- Locking shift 1)
-	case '\017': // LS0 -- Locking shift 0)
+	case '\016': // LS1 -- Locking shift 1
+	case '\017': // LS0 -- Locking shift 0
 		term.line_drawing = term.charset == '0' && u == '\016';
 		return;
 	case 128 ... 191: // UTF-8 continuation byte
-		if ((long) p & 3)
+		if ((long) p & 3) {
 			*p++ = u;
-		return;
+			return;
+		}
 	}
 
 	Glyph *glyph = &TLINE(term.c.y)[term.c.x];
