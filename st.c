@@ -30,7 +30,7 @@
 #define MAX(a, b)           ((a) < (b) ? (b) : (a))
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
 #define IS_CONTROL(c)       ((c) < 0x20 || (c) == 0x7f)
-#define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : 4)
+#define UTF_LEN(c)          ((c) < 0x80 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : 4)
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define SLINE(y)            (term.hist[term.alt ? HIST_SIZE + (y) % 64 : (y) % HIST_SIZE])
@@ -390,15 +390,15 @@ static void draw_glyph(int x, int y)
 		prev = glyph;
 	}
 
-	int old_len = len;
-	buf[len++] = *glyph.u ? *glyph.u : ' ';
-	for (long i = 1; i < UTF_LEN(*glyph.u); ++i) {
-		if (!glyph.u[i]) {
-			memcpy(buf + old_len, "⁇", 3);
-			len = old_len + 3;
-			break;
-		}
-		buf[len++] = glyph.u[i];
+	int utf_len = UTF_LEN(*glyph.u);
+	if (glyph.u[utf_len - 1]) {
+		memcpy(buf + len, glyph.u, utf_len);
+		len += utf_len;
+	} else if (utf_len == 1) {
+		buf[len++] = ' ';
+	} else {
+		memcpy(buf + len, "⁇", 3);
+		len += 3;
 	}
 }
 
@@ -881,12 +881,10 @@ static void handle_esc(u8 ascii)
 	}
 }
 
-static void tputc(const u8 u)
+static void tputc(u8 u)
 {
-	static Glyph *glyph = term.hist[0];
-	static int i;
-	static int utf_len;
 	static const char* line_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
+	Glyph *glyph;
 
 	switch (u) {
 	case '\b':
@@ -908,16 +906,10 @@ static void tputc(const u8 u)
 	case 27: // ESC
 		handle_esc(pty_getchar());
 		return;
-	case ' ' ... '~':
-	case 192 ... 247:
+	case ' ' ... 255:
 		glyph = &TLINE(term.c.y)[term.c.x];
 		*glyph = term.c.attr;
-		utf_len = UTF_LEN(u);
-
-		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
-			memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
-		else
-			glyph->u[i++] = u;
+		glyph->u[0] = u;
 
 		if (term.c.x + 1 < term.col) {
 			++term.c.x;
@@ -925,11 +917,22 @@ static void tputc(const u8 u)
 			newline();
 			term.c.x = 0;
 		}
+
+		int utf_len = UTF_LEN(u);
+		for (int i = 1; i < utf_len; ++i) {
+			u = pty_getchar();
+			if (BETWEEN(u, 128, 191)) {
+				glyph->u[i] = u;
+			} else {
+				tputc(u);
+				return;
+			}
+		}
+
+		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
+			memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
+
 		break;
-	case 128 ... 191: // UTF-8 continuation byte
-		if (i < utf_len)
-			glyph->u[i++] = u;
-		return;
 	}
 }
 
