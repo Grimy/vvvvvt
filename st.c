@@ -116,7 +116,7 @@ static struct {
 	int bot;                               // bottom scroll limit
 	int lines;
 	int cursor;                            // cursor style
-	int charset;
+	u8 charset[4];
 	bool report_buttons, report_motion;
 	bool alt, hide, focus, line_drawing;   // terminal mode flags
 } term;
@@ -815,7 +815,7 @@ static void handle_csi()
 		break;
 	case 'p': // DECSTR -- Soft terminal reset
 		memset(&term.c, 0, sizeof(term.c));
-		term.alt = term.hide = term.focus = term.charset = false;
+		term.alt = term.hide = term.focus = term.line_drawing = false;
 		term.top = 0;
 		term.bot = term.row - 1;
 		break;
@@ -841,17 +841,17 @@ static void handle_csi()
 	}
 }
 
-static void handle_esc(u8 ascii)
+static void handle_esc(u8 second_byte)
 {
-	switch (ascii) {
+	switch (second_byte) {
 	case '[': // CSI -- Control Sequence Introducer
 		handle_csi();
 		break;
 	case ']': // OSC -- Operating System Command
 		while (!IS_CONTROL(pty_getchar()));
 		break;
-	case ')': // G1D4 -- Set secondary charset G1
-		term.charset = pty_getchar();
+	case '(' ... '+':
+		term.charset[second_byte - '('] = pty_getchar();
 		break;
 	case 'E': // NEL -- Next line
 		newline();
@@ -898,7 +898,7 @@ static void tputc(u8 u)
 		return;
 	case '\016': // LS1 -- Locking shift 1
 	case '\017': // LS0 -- Locking shift 0
-		term.line_drawing = term.charset == '0' && u == '\016';
+		term.line_drawing = term.charset[u == '\016'] == '0';
 		return;
 	case '\033': // ESC
 		handle_esc(pty_getchar());
