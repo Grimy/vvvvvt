@@ -38,7 +38,7 @@
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 #define pty_printf(...)     dprintf(pty.fd, __VA_ARGS__)
 
-#define IS_DELIM(c)         (strchr(" <>'`\"(){}", *(c)) != NULL)
+#define IS_DELIM(c)         (strchr(" <>'`\"(){}", *(c)))
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 
@@ -89,7 +89,7 @@ typedef struct {
 } Point;
 
 static struct {
-	int snap;
+	int snap; // snapping mode
 	Point ob; // original coordinates of the beginning of the selection
 	Point oe; // original coordinates of the end of the selection
 	Point nb; // normalized coordinates of the beginning of the selection
@@ -97,40 +97,38 @@ static struct {
 } sel;
 
 static struct {
-	char buf[BUFSIZ];
-	char *c;
-	char *last;
-	int fd;
+	char buf[BUFSIZ];  // input buffer
+	char *c;           // current reading position (points inside buf)
+	char *end;         // one past the last valid char in buf
+	int fd;            // file descriptor of the master pty
 	int: 32;
+	int rows;          // number of lines in a screen
+	int cols;          // number of characters in a line
 } pty;
 
 // Terminal state
 static struct {
-	int row;                              // row count
-	int col;                              // column count
-	Glyph hist[HIST_SIZE][LINE_SIZE];     // history buffer
+	Glyph hist[HIST_SIZE][LINE_SIZE];     // history ring buffer
+	int scroll;                           // hist index of the scroll position
+	int lines;                            // hist index of the last line
 	TCursor c;                            // cursor
 	TCursor saved_c[2];                   // saved cursors
-	int scroll;                           // current scroll position
 	int top;                              // top scroll limit
 	int bot;                              // bottom scroll limit
-	int lines;
-	int cursor;                           // cursor style
+	int cursor_style;
 	u8 charset[4];
 	bool report_buttons, report_motion;
 	bool alt, hide, focus, line_drawing;  // terminal mode flags
 } term;
 
-static char **opt_cmd = (char*[]) { SHELL, NULL };
-
 #define selclear() (sel.ne.y = -1)
 
 static void clear_region(int x1, int y1, int x2, int y2)
 {
-	LIMIT(x1, 0, term.col - 1);
-	LIMIT(x2, 0, term.col - 1);
-	LIMIT(y1, 0, term.row - 1);
-	LIMIT(y2, 0, term.row - 1);
+	LIMIT(x1, 0, pty.cols - 1);
+	LIMIT(x2, 0, pty.cols - 1);
+	LIMIT(y1, 0, pty.rows - 1);
+	LIMIT(y2, 0, pty.rows - 1);
 	assert(y1 < y2 || (y1 == y2 && x1 <= x2));
 
 	if (sel.nb.y <= y2 && sel.ne.y >= y1)
@@ -138,7 +136,7 @@ static void clear_region(int x1, int y1, int x2, int y2)
 
 	for (int y = y1; y <= y2; y++) {
 		int xstart = y == y1 ? x1 : 0;
-		int xend = y == y2 ? x2 : term.col - 1;
+		int xend = y == y2 ? x2 : pty.cols - 1;
 		memset(TLINE(y) + xstart, 0, (xend - xstart + 1) * sizeof(Glyph));
 	}
 }
@@ -151,14 +149,14 @@ static void move_region(int start, int diff) {
 	int last = end - diff + step;
 	for (int y = start; y != last; y += step)
 		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
-	clear_region(0, MIN(last, end), term.col - 1, MAX(last, end));
+	clear_region(0, MIN(last, end), pty.cols - 1, MAX(last, end));
 }
 
 static void move_chars(bool forward, int diff) {
 	int dst = term.c.x + (forward ? diff : 0);
 	int src = term.c.x + (forward ? 0 : diff);
-	int size = term.col - (term.c.x + diff);
-	int del = (forward ? term.c.x : term.col - diff);
+	int size = pty.cols - (term.c.x + diff);
+	int del = (forward ? term.c.x : pty.cols - diff);
 	Glyph *line = TLINE(term.c.y);
 	memmove(line + dst, line + src, size * sizeof(Glyph));
 	clear_region(del, term.c.y, del + diff - 1, term.c.y);
@@ -166,8 +164,8 @@ static void move_chars(bool forward, int diff) {
 
 static void move_to(int x, int y)
 {
-	term.c.x = LIMIT(x, 0, term.col - 1);
-	term.c.y = LIMIT(y, 0, term.row - 1);
+	term.c.x = LIMIT(x, 0, pty.cols - 1);
+	term.c.y = LIMIT(y, 0, pty.rows - 1);
 }
 
 static void swap_screen(void)
@@ -179,7 +177,7 @@ static void swap_screen(void)
 	term.alt = !term.alt;
 	if (term.alt) {
 		scroll_save = term.lines;
-		term.lines += term.row;
+		term.lines += pty.rows;
 	} else {
 		term.lines = scroll_save;
 	}
@@ -196,7 +194,7 @@ static void newline()
 	} else {
 		++term.lines;
 		++term.scroll;
-		clear_region(0, term.bot, term.col - 1, term.row - 1);
+		clear_region(0, term.bot, pty.cols - 1, pty.rows - 1);
 	}
 }
 
@@ -241,7 +239,7 @@ static void scroll(int n)
 {
 	if (!term.alt) {
 		term.scroll += n;
-		LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + term.row), term.lines);
+		LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + pty.rows), term.lines);
 	}
 }
 
@@ -249,8 +247,8 @@ static Point ev2point(XButtonEvent *e)
 {
 	int x = (e->x - BORDERPX) / xw.cw;
 	int y = (e->y - BORDERPX) / xw.ch;
-	LIMIT(x, 0, term.col - 1);
-	LIMIT(y, 0, term.row - 1);
+	LIMIT(x, 0, pty.cols - 1);
+	LIMIT(y, 0, pty.rows - 1);
 	return (Point) { x, y + term.scroll };
 }
 
@@ -261,7 +259,7 @@ static void selnormalize(void)
 	sel.ne = swapped ? sel.ob : sel.oe;
 	if (sel.snap >= SNAP_LINE) {
 		sel.nb.x = 0;
-		sel.ne.x = term.col - 1;
+		sel.ne.x = pty.cols - 1;
 	} else if (sel.snap == SNAP_WORD) {
 		while (sel.nb.x > 0 && !IS_DELIM(SLINE(sel.nb.y)[sel.nb.x - 1].u))
 			--sel.nb.x;
@@ -302,12 +300,12 @@ static void load_fonts(char *fontstr)
 
 static void create_window(void)
 {
-	if (!(xw.dpy = XOpenDisplay(NULL)))
+	if (!(xw.dpy = XOpenDisplay(0)))
 		die("Can't open display\n");
 
 	// Set geometry to some arbitrary values while we wait for the resize event
-	xw.width = term.col * xw.cw + 2 * BORDERPX;
-	xw.height = term.row * xw.ch + 2 * BORDERPX;
+	xw.width = pty.cols * xw.cw + 2 * BORDERPX;
+	xw.height = pty.rows * xw.ch + 2 * BORDERPX;
 
 	// Events
 	Visual *visual = DefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
@@ -377,8 +375,8 @@ static void draw_glyph(int x, int y)
 		glyph.mode ^= ATTR_REVERSE;
 
 	int cursor = term.hide || term.scroll != term.lines ? 0 :
-		xw.focused && term.cursor < 3 ? ATTR_REVERSE :
-		term.cursor < 5 ? ATTR_UNDERLINE : ATTR_BAR;
+		xw.focused && term.cursor_style < 3 ? ATTR_REVERSE :
+		term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 
 	if (x == term.c.x && y == term.c.y)
 		glyph.mode ^= cursor;
@@ -410,8 +408,8 @@ static void draw(void)
 {
 	XftDrawRect(xw.draw, colors, 0, 0, xw.width, xw.height);
 
-	for (int y = 0; y < term.row; ++y)
-		for (int x = 0; x < term.col; ++x)
+	for (int y = 0; y < pty.rows; ++y)
+		for (int x = 0; x < pty.cols; ++x)
 			draw_glyph(x, y);
 	draw_glyph(0, 0);
 
@@ -424,7 +422,7 @@ static void getsel(FILE* pipe)
 	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
 		Glyph *line = SLINE(y);
 		int x1 = sel.nb.y == y ? sel.nb.x : 0;
-		int x2 = sel.ne.y == y ? sel.ne.x : term.col - 1;
+		int x2 = sel.ne.y == y ? sel.ne.x : pty.cols - 1;
 		int x;
 
 		for (x = x1; x <= x2 && *line[x].u; ++x)
@@ -484,32 +482,6 @@ static char* kmap(KeySym k, u32 state)
 	return "";
 }
 
-static void resize(int width, int height)
-{
-	int col = (width - 2 * BORDERPX) / xw.cw;
-	int row = (height - 2 * BORDERPX) / xw.ch;
-
-	// Update terminal info
-	term.col = col;
-	term.row = row;
-	term.top = 0;
-	term.bot = row - 1;
-	move_to(term.c.x, term.c.y);
-
-	// Update X window data
-	xw.width = width;
-	xw.height = height;
-	XFreePixmap(xw.dpy, xw.pixmap);
-	xw.pixmap = XCreatePixmap(xw.dpy, xw.win, width, height, 24);
-	XftDrawChange(xw.draw, xw.pixmap);
-	XftDrawRect(xw.draw, colors, 0, 0, width, height);
-
-	// Send our size to the pty driver so that applications can query it
-	struct winsize w = { (u16) term.row, (u16) term.col, 0, 0 };
-	if (ioctl(pty.fd, TIOCSWINSZ, &w) < 0)
-		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
-}
-
 static void kpress(XEvent *e)
 {
 	XKeyEvent *ev = &e->xkey;
@@ -524,9 +496,9 @@ static void kpress(XEvent *e)
 	if (ksym == XK_Insert && (ev->state & ShiftMask))
 		xsel("xsel -po", false);
 	else if (ksym == XK_Prior && (ev->state & ShiftMask))
-		scroll(4 - term.row);
+		scroll(4 - pty.rows);
 	else if (ksym == XK_Next && (ev->state & ShiftMask))
-		scroll(term.row - 4);
+		scroll(pty.rows - 4);
 	else if (ksym == XK_C && !((ControlMask | ShiftMask) & ~ev->state))
 		xsel("xsel -bi", true);
 	else if (ksym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
@@ -537,12 +509,32 @@ static void kpress(XEvent *e)
 		pty_printf("%s", kmap(ksym, ev->state));
 }
 
-static void configure_notify(XEvent *e)
+static void resize(XEvent *e)
 {
 	XConfigureEvent *ev = &e->xconfigure;
 
-	if (ev->width != xw.width || ev->height != xw.height)
-		resize(ev->width, ev->height);
+	if (ev->width == xw.width && ev->height == xw.height)
+		return;
+
+	// Update terminal info
+	pty.cols = (u16) (ev->width - 2 * BORDERPX) / xw.cw;
+	pty.rows = (u16) (ev->height - 2 * BORDERPX) / xw.ch;
+	term.top = 0;
+	term.bot = pty.rows - 1;
+	move_to(term.c.x, term.c.y);
+
+	// Update X window data
+	xw.width = ev->width;
+	xw.height = ev->height;
+	XFreePixmap(xw.dpy, xw.pixmap);
+	xw.pixmap = XCreatePixmap(xw.dpy, xw.win, xw.width, xw.height, 24);
+	XftDrawChange(xw.draw, xw.pixmap);
+	XftDrawRect(xw.draw, colors, 0, 0, xw.width, xw.height);
+
+	// Send our size to the pty driver so that applications can query it
+	struct winsize w = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
+	if (ioctl(pty.fd, TIOCSWINSZ, &w) < 0)
+		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
 }
 
 static void visibility(XEvent *e)
@@ -622,7 +614,7 @@ static void brelease(XEvent *e)
 
 static void (*handler[LASTEvent])(XEvent *) = {
 	[KeyPress] = kpress,
-	[ConfigureNotify] = configure_notify,
+	[ConfigureNotify] = resize,
 	[VisibilityNotify] = visibility,
 	[FocusIn] = focus,
 	[FocusOut] = focus,
@@ -633,23 +625,25 @@ static void (*handler[LASTEvent])(XEvent *) = {
 
 static char pty_getchar(void)
 {
-	if (pty.c >= pty.last) {
+	if (pty.c >= pty.end) {
 		pty.c = pty.buf;
-		pty.last = pty.buf + read(pty.fd, pty.buf, BUFSIZ);
-		if (pty.last < pty.buf)
+		pty.end = pty.buf + read(pty.fd, pty.buf, BUFSIZ);
+		if (pty.end < pty.buf)
 			exit(0);
 	}
 
 	return *pty.c++;
 }
 
-static void pty_new(void)
+static void pty_new(char* cmd[])
 {
-	switch (forkpty(&pty.fd, NULL, NULL, &(struct winsize) { 24, 80, 0, 0 })) {
+	pty.rows = 24;
+	pty.cols = 80;
+	switch (forkpty(&pty.fd, 0, 0, &(struct winsize) { 24, 80, 0, 0 })) {
 	case -1:
 		die("forkpty failed\n");
 	case 0:
-		execvp(opt_cmd[0], opt_cmd);
+		execvp(cmd[0], cmd);
 		die("exec failed: %s\n", strerror(errno));
 	default:
 		signal(SIGCHLD, SIG_IGN);
@@ -704,7 +698,7 @@ static void set_mode(bool set, int mode)
 		if (set ^ term.alt)
 			swap_screen();
 		if (set)
-			clear_region(0, 0, term.col - 1, term.row - 1);
+			clear_region(0, 0, pty.cols - 1, pty.rows - 1);
 		break;
 	case 1000: // Report mouse buttons
 	case 1003: // Report mouse motion
@@ -771,8 +765,8 @@ static void handle_csi()
 		clear_region(
 			*arg ? 0 : term.c.x,
 			*arg && command == 'J' ? 0 : term.c.y,
-			*arg == 1 ? term.c.x : term.col - 1,
-			*arg == 1 || command == 'K' ? term.c.y : term.row - 1);
+			*arg == 1 ? term.c.x : pty.cols - 1,
+			*arg == 1 || command == 'K' ? term.c.y : pty.rows - 1);
 		break;
 	case 'L': // IL -- Insert <n> blank lines
 	case 'M': // DL -- Delete <n> lines
@@ -784,7 +778,7 @@ static void handle_csi()
 		break;
 	case 'P': // DCH -- Delete <n> char
 	case '@': // ICH -- Insert <n> blank char
-		LIMIT(*arg, 1, term.col - term.c.x);
+		LIMIT(*arg, 1, pty.cols - term.c.x);
 		move_chars(command == '@', *arg);
 		break;
 	case 'S': // SU -- Scroll <n> line up
@@ -793,7 +787,7 @@ static void handle_csi()
 		move_region(term.top, command == 'T' ? -*arg : *arg);
 		break;
 	case 'X': // ECH -- Erase <n> char
-		LIMIT(*arg, 1, term.col - term.c.x);
+		LIMIT(*arg, 1, pty.cols - term.c.x);
 		clear_region(term.c.x, term.c.y, term.c.x + *arg - 1, term.c.y);
 		break;
 	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
@@ -819,18 +813,16 @@ static void handle_csi()
 			pty_printf("\033[%i;%iR", term.c.y + 1, term.c.x + 1);
 		break;
 	case 'p': // DECSTR -- Soft terminal reset
-		memset(&term.c, 0, sizeof(term.c));
-		term.alt = term.hide = term.focus = term.line_drawing = false;
-		term.top = 0;
-		term.bot = term.row - 1;
+		memset(&term.top, 0, sizeof(term) - ((char*) &term.top - (char*) &term));
+		term.bot = pty.rows - 1;
 		break;
 	case 'q': // DECSCUSR -- Set Cursor Style
 		if (*arg <= 6)
-			term.cursor = *arg;
+			term.cursor_style = *arg;
 		break;
 	case 'r': // DECSTBM -- Set Scrolling Region
 		arg[0] = arg[0] ? arg[0] : 1;
-		arg[1] = arg[1] && arg[1] < term.row ? arg[1] : term.row;
+		arg[1] = arg[1] && arg[1] < pty.rows ? arg[1] : pty.rows;
 		if (arg[0] < arg[1]) {
 			term.top = arg[0] - 1;
 			term.bot = arg[1] - 1;
@@ -870,7 +862,7 @@ static void handle_esc(u8 second_byte)
 		break;
 	case 'c': // RIS -- Reset to inital state
 		memset(&term, 0, sizeof(term));
-		resize(xw.width, xw.height);
+		term.bot = pty.rows - 1;
 		break;
 	case '7': // DECSC -- Save Cursor
 		term.saved_c[term.alt] = term.c;
@@ -926,7 +918,7 @@ static void tputc(u8 u)
 			memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
 
 		++term.c.x;
-		if (term.c.x == term.col) {
+		if (term.c.x == pty.cols) {
 			newline();
 			term.c.x = 0;
 		}
@@ -955,7 +947,7 @@ static void __attribute__((noreturn)) run(void)
 		if (FD_ISSET(pty.fd, &read_fds)) {
 			term.scroll = term.lines;
 			tputc(pty_getchar());
-			while (pty.c < pty.last)
+			while (pty.c < pty.end)
 				tputc(*pty.c++);
 		}
 
@@ -977,14 +969,9 @@ static void __attribute__((noreturn)) run(void)
 
 int main(int argc, char *argv[])
 {
-	if (argc > 1)
-		opt_cmd = argv + 1;
-
-	term.row = 24;
-	term.col = 80;
 	create_window();
 	setlocale(LC_CTYPE, "");
 	load_fonts(FONTNAME);
-	pty_new();
+	pty_new(argc > 1 ? argv + 1 : (char*[]) { SHELL, NULL });
 	run();
 }
