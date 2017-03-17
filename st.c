@@ -729,9 +729,8 @@ static void handle_csi()
 	case ';':
 		nargs = MIN(nargs + 1, LEN(arg) - 1);
 		goto csi;
-	case ' ':
-	case '?':
-	case '!':
+	case ' ' ... '/': // Leading intermediate bytes
+	case '<' ... '?': // Private mode characters
 		goto csi;
 	case 'A': // CUU -- Cursor <n> Up
 		move_to(term.c.x, term.c.y - MAX(*arg, 1));
@@ -796,6 +795,9 @@ static void handle_csi()
 		break;
 	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
 		move_to((term.c.x & ~7) - (MAX(*arg, 1) << 3), term.c.y);
+		break;
+	case 'b': // REP -- Repeat the preceding graphic character <n> times
+		// TODO
 		break;
 	case 'c': // DA -- Device Attributes
 		if (*arg == 0)
@@ -881,51 +883,53 @@ static void handle_esc(u8 ascii)
 
 static void tputc(const u8 u)
 {
-	static u8* p;
+	static Glyph *glyph = term.hist[0];
+	static int i;
+	static int utf_len;
+	static const char* line_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
 
 	switch (u) {
+	case '\b':
+		move_to(term.c.x - 1, term.c.y);
+		return;
 	case '\t':
 		move_to((term.c.x & ~7) + 8, term.c.y);
 		return;
-	case '\b':
-		move_to(term.c.x - 1, term.c.y);
+	case '\n' ... '\f':
+		newline();
 		return;
 	case '\r':
 		term.c.x = 0;
 		return;
-	case '\f':
-	case '\v':
-	case '\n':
-		newline();
-		return;
-	case '\033': // ESC
-		handle_esc(pty_getchar());
-		return;
-	case '\016': // LS1 -- Locking shift 1
-	case '\017': // LS0 -- Locking shift 0
+	case 14: // LS1 -- Locking shift 1
+	case 15: // LS0 -- Locking shift 0
 		term.line_drawing = term.charset == '0' && u == '\016';
 		return;
-	case 128 ... 191: // UTF-8 continuation byte
-		if ((long) p & 3) {
-			*p++ = u;
-			return;
+	case 27: // ESC
+		handle_esc(pty_getchar());
+		return;
+	case ' ' ... '~':
+	case 192 ... 247:
+		glyph = &TLINE(term.c.y)[term.c.x];
+		*glyph = term.c.attr;
+		utf_len = UTF_LEN(u);
+
+		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
+			memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
+		else
+			glyph->u[i++] = u;
+
+		if (term.c.x + 1 < term.col) {
+			++term.c.x;
+		} else {
+			newline();
+			term.c.x = 0;
 		}
-	}
-
-	Glyph *glyph = &TLINE(term.c.y)[term.c.x];
-	*glyph = term.c.attr;
-	p = glyph->u;
-	*p++ = u;
-
-	static const char* line_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
-	if (term.line_drawing && BETWEEN(u, 'j', 'x'))
-		memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
-
-	if (term.c.x + 1 < term.col) {
-		++term.c.x;
-	} else {
-		newline();
-		term.c.x = 0;
+		break;
+	case 128 ... 191: // UTF-8 continuation byte
+		if (i < utf_len)
+			glyph->u[i++] = u;
+		return;
 	}
 }
 
