@@ -36,7 +36,6 @@
 #define SLINE(y)            (term.hist[(y) % HIST_SIZE])
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
-#define pty_printf(...)     dprintf(pty.fd, __VA_ARGS__)
 
 #define IS_DELIM(c)         (strchr(" <>'`\"(){}", *(c)))
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
@@ -66,7 +65,7 @@ enum {
 
 typedef struct {
 	u8 u[4];   // raw UTF-8 bytes
-	u16 mode;  // attribute bitmask
+	u16 mode;  // bitmask of ATTR_* flags
 	u8 fg;     // foreground color
 	u8 bg;     // background color
 } Glyph;
@@ -76,12 +75,6 @@ typedef struct {
 	int x;
 	int y;
 } TCursor;
-
-typedef struct {
-	KeySym k;
-	u64 mask;
-	char *s;
-} Key;
 
 typedef struct {
 	int x;
@@ -207,33 +200,9 @@ static struct {
 	GC gc;
 	XftDraw *draw;
 	int width, height;
-	int ch, cw;   // character width and height
 	bool visible;
 	bool focused;
 } xw;
-
-// Escape sequences emitted when pressing special keys.
-static Key key[] = {
-	// keysym           mask          string
-	{ XK_Up,            ControlMask,  "\033[1;5A" },
-	{ XK_Up,            0,            "\033OA"    },
-	{ XK_Down,          ControlMask,  "\033[1;5B" },
-	{ XK_Down,          0,            "\033OB"    },
-	{ XK_Right,         ControlMask,  "\033[1;5C" },
-	{ XK_Right,         0,            "\033OC"    },
-	{ XK_Left,          ControlMask,  "\033[1;5D" },
-	{ XK_Left,          0,            "\033OD"    },
-	{ XK_ISO_Left_Tab,  0,            "\033[Z"    },
-	{ XK_BackSpace,     ControlMask,  "\027"      },
-	{ XK_BackSpace,     0,            "\177"      },
-	{ XK_Home,          0,            "\033[1~"   },
-	{ XK_Insert,        0,            "\033[2~"   },
-	{ XK_Delete,        ControlMask,  "\033[3;5~" },
-	{ XK_Delete,        0,            "\033[3~"   },
-	{ XK_End,           0,            "\033[4~"   },
-	{ XK_Prior,         0,            "\033[5~"   },
-	{ XK_Next,          0,            "\033[6~"   },
-};
 
 static void scroll(int n)
 {
@@ -245,8 +214,8 @@ static void scroll(int n)
 
 static Point ev2point(XButtonEvent *e)
 {
-	int x = (e->x - BORDERPX) / xw.cw;
-	int y = (e->y - BORDERPX) / xw.ch;
+	int x = (e->x - BORDERPX) / xw.font[0]->max_advance_width;
+	int y = (e->y - BORDERPX) / xw.font[0]->height;
 	LIMIT(x, 0, pty.cols - 1);
 	LIMIT(y, 0, pty.rows - 1);
 	return (Point) { x, y + term.scroll };
@@ -293,8 +262,6 @@ static void load_fonts(char *fontstr)
 		FcPatternDestroy(match);
 	}
 
-	xw.cw = xw.font[0]->max_advance_width;
-	xw.ch = xw.font[0]->height;
 	FcPatternDestroy(pattern);
 }
 
@@ -303,9 +270,11 @@ static void create_window(void)
 	if (!(xw.dpy = XOpenDisplay(0)))
 		die("Can't open display\n");
 
+	load_fonts(FONTNAME);
+
 	// Set geometry to some arbitrary values while we wait for the resize event
-	xw.width = pty.cols * xw.cw + 2 * BORDERPX;
-	xw.height = pty.rows * xw.ch + 2 * BORDERPX;
+	xw.width = pty.cols * xw.font[0]->max_advance_width + 2 * BORDERPX;
+	xw.height = pty.rows * xw.font[0]->height + 2 * BORDERPX;
 
 	// Events
 	Visual *visual = DefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
@@ -338,7 +307,7 @@ static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 	const XftColor *fg = &colors[glyph.fg ? glyph.fg : DEFAULTFG];
 	const XftColor *bg = &colors[glyph.bg];
 	int baseline = y + font->ascent;
-	int width = xw.cw * len;
+	int width = len * font->max_advance_width;
 
 	if (glyph.mode & ATTR_REVERSE)
 		SWAP(fg, bg);
@@ -347,17 +316,17 @@ static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 		fg = bg;
 
 	// Draw the background, then the text, then decorations
-	XftDrawRect(xw.draw, bg, x, y, width, xw.ch);
+	XftDrawRect(xw.draw, bg, x, y, width, font->height);
 	XftDrawStringUtf8(xw.draw, fg, font, x, baseline, text, len);
 
 	if (glyph.mode & ATTR_UNDERLINE)
-		XftDrawRect(xw.draw, fg, x, baseline + 1, xw.cw, 1);
+		XftDrawRect(xw.draw, fg, x, baseline + 1, width, 1);
 
 	if (glyph.mode & ATTR_STRUCK)
 		XftDrawRect(xw.draw, fg, x, (2 * baseline + y) / 3, width, 1);
 
 	if (glyph.mode & ATTR_BAR)
-		XftDrawRect(xw.draw, fg, x, y, 2, xw.ch);
+		XftDrawRect(xw.draw, fg, x, y, 2, font->height);
 }
 
 // Draws the glyph at the given terminal coordinates.
@@ -386,8 +355,8 @@ static void draw_glyph(int x, int y)
 	if (x == 0 || diff) {
 		draw_text(prev, buf, len, draw_x, draw_y);
 		len = 0;
-		draw_x = BORDERPX + x * xw.cw;
-		draw_y = BORDERPX + y * xw.ch;
+		draw_x = BORDERPX + x * xw.font[0]->max_advance_width;
+		draw_y = BORDERPX + y * xw.font[0]->height;
 		prev = glyph;
 	}
 
@@ -444,7 +413,7 @@ static void xsel(char* opts, bool copy)
 	} else {
 		char sel_buf[BUFSIZ] = { 0 };
 		fread(sel_buf, 1, BUFSIZ, pipe);
-		pty_printf("%s", sel_buf);
+		dprintf(pty.fd, "%s", sel_buf);
 	}
 
 	fclose(pipe);
@@ -454,6 +423,7 @@ static void mousereport(XButtonEvent *e)
 {
 	static Point prev;
 	Point pos = ev2point(e);
+	pos.y -= term.scroll;
 
 	if (pos.x > 255 || pos.y > 255)
 		return;
@@ -468,42 +438,64 @@ static void mousereport(XButtonEvent *e)
 	button += (e->state & Mod4Mask   ) ? 8  : 0;
 	button += (e->state & ControlMask) ? 16 : 0;
 
-	pty_printf("\033[M%c%c%c", 32 + button, 33 + pos.x, 33 + pos.y - term.scroll);
+	dprintf(pty.fd, "\033[M%c%c%c", 32 + button, 33 + pos.x, 33 + pos.y);
 }
 
-static char* kmap(KeySym k, u32 state)
+static char* kmap(KeySym keysym, bool ctrl, char* string)
 {
-	for (Key *kp = key; kp < key + LEN(key); kp++)
-		if (kp->k == k && !(kp->mask & ~state))
-			return kp->s;
-	return "";
+	switch (keysym) {
+	case XK_Up:
+		return ctrl ? "\033[1;5A" : "\033OA";
+	case XK_Down:
+		return ctrl ? "\033[1;5B" : "\033OB";
+	case XK_Right:
+		return ctrl ? "\033[1;5C" : "\033OC";
+	case XK_Left:
+		return ctrl ? "\033[1;5D" : "\033OD";
+	case XK_ISO_Left_Tab:
+		return "\033[Z";
+	case XK_BackSpace:
+		return ctrl ? "\027" : "\177";
+	case XK_Home:
+		return "\033[1~";
+	case XK_Insert:
+		return "\033[2~";
+	case XK_Delete:
+		return ctrl ? "\033[3;5~" : "\033[3~";
+	case XK_End:
+		return "\033[4~";
+	case XK_Prior:
+		return "\033[5~";
+	case XK_Next:
+		return "\033[6~";
+	default:
+		return string;
+	}
 }
 
 static void kpress(XEvent *e)
 {
 	XKeyEvent *ev = &e->xkey;
 	char buf[8] = { 0 };
-	KeySym ksym;
-	int len = XLookupString(ev, buf, LEN(buf) - 1, &ksym, NULL);
+	KeySym keysym;
+	XLookupString(ev, buf, LEN(buf) - 1, &keysym, NULL);
 
 	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
 		selclear();
 
 	// Internal shortcuts
-	if (ksym == XK_Insert && (ev->state & ShiftMask))
+	if (keysym == XK_Insert && (ev->state & ShiftMask))
 		xsel("xsel -po", false);
-	else if (ksym == XK_Prior && (ev->state & ShiftMask))
+	else if (keysym == XK_Prior && (ev->state & ShiftMask))
 		scroll(4 - pty.rows);
-	else if (ksym == XK_Next && (ev->state & ShiftMask))
+	else if (keysym == XK_Next && (ev->state & ShiftMask))
 		scroll(pty.rows - 4);
-	else if (ksym == XK_C && !((ControlMask | ShiftMask) & ~ev->state))
+	else if (keysym == XK_C && !((ControlMask | ShiftMask) & ~ev->state))
 		xsel("xsel -bi", true);
-	else if (ksym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
+	else if (keysym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
 		xsel("xsel -bo", false);
-	else if (len && *buf != '\b' && *buf != '\177')
-		pty_printf("%s", buf);
 	else
-		pty_printf("%s", kmap(ksym, ev->state));
+		dprintf(pty.fd, "%s", kmap(keysym, ev->state & ControlMask, buf));
 }
 
 static void resize(XEvent *e)
@@ -514,8 +506,8 @@ static void resize(XEvent *e)
 		return;
 
 	// Update terminal info
-	pty.cols = (u16) (ev->width - 2 * BORDERPX) / xw.cw;
-	pty.rows = (u16) (ev->height - 2 * BORDERPX) / xw.ch;
+	pty.cols = (u16) (ev->width - 2 * BORDERPX) / xw.font[0]->max_advance_width;
+	pty.rows = (u16) (ev->height - 2 * BORDERPX) / xw.font[0]->height;
 	term.top = 0;
 	term.bot = pty.rows - 1;
 	move_to(term.c.x, term.c.y);
@@ -549,7 +541,7 @@ static void focus(XEvent *ev)
 
 	xw.focused = ev->type == FocusIn;
 	if (term.focus)
-		pty_printf("\033[%c", xw.focused ? 'I' : 'O');
+		dprintf(pty.fd, "\033[%c", xw.focused ? 'I' : 'O');
 }
 
 static void bmotion(XEvent *e)
@@ -792,7 +784,7 @@ static void handle_csi()
 		break;
 	case 'c': // DA -- Device Attributes
 		if (*arg == 0)
-			pty_printf("%s", VTIDEN);
+			dprintf(pty.fd, "%s", VTIDEN);
 		break;
 	case 'd': // VPA -- Move to <row>
 		move_to(term.c.x, *arg - 1);
@@ -807,7 +799,7 @@ static void handle_csi()
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 6)
-			pty_printf("\033[%i;%iR", term.c.y + 1, term.c.x + 1);
+			dprintf(pty.fd, "\033[%i;%iR", term.c.y + 1, term.c.x + 1);
 		break;
 	case 'p': // DECSTR -- Soft terminal reset
 		memset(&term.top, 0, sizeof(term) - ((char*) &term.top - (char*) &term));
@@ -966,9 +958,8 @@ static void __attribute__((noreturn)) run(void)
 
 int main(int argc, char *argv[])
 {
-	create_window();
 	setlocale(LC_CTYPE, "");
-	load_fonts(FONTNAME);
+	create_window();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { SHELL, NULL });
 	run();
 }
