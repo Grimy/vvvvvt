@@ -38,7 +38,7 @@
 
 #define IS_DELIM(c)         (strchr(" <>'`\"(){}", *(c)))
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
-#define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
+#define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x >= (b).x))
 
 #define Glyph Glyph_
 
