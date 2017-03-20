@@ -29,7 +29,6 @@
 #define MIN(a, b)           ((a) > (b) ? (b) : (a))
 #define MAX(a, b)           ((a) < (b) ? (b) : (a))
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
-#define IS_CONTROL(c)       ((c) < 0x20 || (c) == 0x7f)
 #define UTF_LEN(c)          ((c) < 0x80 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : 4)
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
@@ -134,8 +133,7 @@ static void clear_region(int x1, int y1, int x2, int y2)
 	}
 }
 
-static void move_region(int start, int diff) {
-	int end = term.bot;
+static void move_region(int start, int end, int diff) {
 	int step = diff < 0 ? -1 : 1;
 	if (diff < 0)
 		SWAP(start, end);
@@ -163,31 +161,24 @@ static void move_to(int x, int y)
 
 static void swap_screen(void)
 {
-	static int scroll_save = 0;
-
 	selclear();
 	term.saved_c[term.alt] = term.c;
 	term.alt = !term.alt;
-	if (term.alt) {
-		scroll_save = term.lines;
-		term.lines += pty.rows;
-	} else {
-		term.lines = scroll_save;
-	}
-	term.scroll = term.lines;
 	term.c = term.saved_c[term.alt];
+	term.lines += term.alt ? pty.rows : -pty.rows;
+	term.scroll = term.lines;
 }
 
 static void newline()
 {
 	if (term.c.y != term.bot) {
-		++term.c.y;
-	} else if (term.top) {
-		move_region(term.top, 1);
+		move_to(term.c.x, term.c.y + 1);
+	} else if (term.top || term.alt) {
+		move_region(term.top, term.bot, 1);
 	} else {
 		++term.lines;
 		++term.scroll;
-		clear_region(0, term.bot, pty.cols - 1, pty.rows - 1);
+		move_region(term.bot, pty.rows - 1, -1);
 	}
 }
 
@@ -385,13 +376,13 @@ static void draw(void)
 	XCopyArea(xw.dpy, xw.pixmap, xw.win, xw.gc, 0, 0, xw.width, xw.height, 0, 0);
 }
 
-// append every set & selected glyph to the selection
+// Write every set and selected byte to the pipe
 static void getsel(FILE* pipe)
 {
 	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
 		Glyph *line = SLINE(y);
-		int x1 = sel.nb.y == y ? sel.nb.x : 0;
-		int x2 = sel.ne.y == y ? sel.ne.x : pty.cols - 1;
+		int x1 = y == sel.nb.y ? sel.nb.x : 0;
+		int x2 = y == sel.ne.y ? sel.ne.x : pty.cols - 1;
 		int x;
 
 		for (x = x1; x <= x2 && *line[x].u; ++x)
@@ -715,8 +706,8 @@ static void handle_csi()
 	case ';':
 		nargs = MIN(nargs + 1, LEN(arg) - 1);
 		goto csi;
-	case ' ' ... '/': // Leading intermediate bytes
-	case '<' ... '?': // Private mode characters
+	case ' ' ... '/': // Intermediate bytes
+	case '<' ... '?': // Private parameter bytes
 		goto csi;
 	case 'A': // CUU -- Cursor <n> Up
 		move_to(term.c.x, term.c.y - MAX(*arg, 1));
@@ -746,8 +737,8 @@ static void handle_csi()
 	case 'f': // HVP -- Move to <row> <col>
 		move_to(arg[1] - 1, arg[0] - 1);
 		break;
-	case 'I': // CHT -- Cursor Forward Tabulation <n> tab stops
-		move_to((term.c.x & ~7) + (MAX(*arg, 1) << 3), term.c.y);
+	case 'I': // CHT -- Cursor forward <n> tabulation stops
+		move_to(((term.c.x >> 3) + MAX(*arg, 1)) << 3, term.c.y);
 		break;
 	case 'J': // ED -- Clear screen
 	case 'K': // EL -- Clear line
@@ -761,7 +752,7 @@ static void handle_csi()
 	case 'M': // DL -- Delete <n> lines
 		if (BETWEEN(term.c.y, term.top, term.bot)) {
 			LIMIT(*arg, 1, term.bot - term.c.y + 1);
-			move_region(term.c.y, command == 'L' ? -*arg : *arg);
+			move_region(term.c.y, term.bot, command == 'L' ? -*arg : *arg);
 			term.c.x = 0;
 		}
 		break;
@@ -773,14 +764,14 @@ static void handle_csi()
 	case 'S': // SU -- Scroll <n> line up
 	case 'T': // SD -- Scroll <n> line down
 		LIMIT(*arg, 1, term.bot - term.top + 1);
-		move_region(term.top, command == 'T' ? -*arg : *arg);
+		move_region(term.top, term.bot, command == 'T' ? -*arg : *arg);
 		break;
 	case 'X': // ECH -- Erase <n> char
 		LIMIT(*arg, 1, pty.cols - term.c.x);
 		clear_region(term.c.x, term.c.y, term.c.x + *arg - 1, term.c.y);
 		break;
-	case 'Z': // CBT -- Cursor Backward Tabulation <n> tab stops
-		move_to((term.c.x & ~7) - (MAX(*arg, 1) << 3), term.c.y);
+	case 'Z': // CBT -- Cursor backward <n> tabulation stops
+		move_to(((term.c.x >> 3) - MAX(*arg, 1)) << 3, term.c.y);
 		break;
 	case 'c': // DA -- Device Attributes
 		if (*arg == 0)
@@ -789,12 +780,12 @@ static void handle_csi()
 	case 'd': // VPA -- Move to <row>
 		move_to(term.c.x, *arg - 1);
 		break;
-	case 'h': // SM -- Set terminal mode
+	case 'h': // SM -- Set Mode
 	case 'l': // RM -- Reset Mode
 		for (u32 i = 0; i <= nargs; ++i)
 			set_mode(command == 'h', arg[i]);
 		break;
-	case 'm': // SGR -- Terminal attribute
+	case 'm': // SGR -- Select Graphic Rendition
 		for (u32 i = 0; i <= nargs; i += set_attr(arg + i));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
@@ -829,15 +820,20 @@ static void handle_csi()
 
 static void handle_esc(u8 second_byte)
 {
+	u8 final_byte = ' ';
+
 	switch (second_byte) {
-	case '[': // CSI -- Control Sequence Introducer
-		handle_csi();
+	case ' ' ... '/':
+		while (BETWEEN(final_byte, ' ', '/'))
+			final_byte = pty_getchar();
+		if (BETWEEN(second_byte, '(', '+'))
+			term.charset[second_byte - '('] = final_byte;
 		break;
-	case ']': // OSC -- Operating System Command
-		while (!IS_CONTROL(pty_getchar()));
+	case '7': // DECSC -- Save Cursor
+		term.saved_c[term.alt] = term.c;
 		break;
-	case '(' ... '+':
-		term.charset[second_byte - '('] = pty_getchar();
+	case '8': // DECRC -- Restore Cursor
+		term.c = term.saved_c[term.alt];
 		break;
 	case 'E': // NEL -- Next line
 		newline();
@@ -845,19 +841,25 @@ static void handle_esc(u8 second_byte)
 		break;
 	case 'M': // RI -- Reverse index
 		if (term.c.y <= term.top)
-			move_region(term.top, -1);
+			move_region(term.top, term.bot, -1);
 		else
 			--term.c.y;
+		break;
+	case '[': // CSI -- Control Sequence Introducer
+		handle_csi();
+		break;
+	case ']': // OSC -- Operating System Command
+		for (u8 c = 0; c != '\a'; c = pty_getchar())
+			if (c == '\033' && pty_getchar())
+				break;
 		break;
 	case 'c': // RIS -- Reset to inital state
 		memset(&term, 0, sizeof(term));
 		term.bot = pty.rows - 1;
 		break;
-	case '7': // DECSC -- Save Cursor
-		term.saved_c[term.alt] = term.c;
-		break;
-	case '8': // DECRC -- Restore Cursor
-		term.c = term.saved_c[term.alt];
+	case 'n':
+	case 'o':
+		term.line_drawing = term.charset[second_byte - 'n' + 2] == '0';
 		break;
 	}
 }
@@ -874,7 +876,7 @@ static void tputc(u8 u)
 		move_to(term.c.x - 1, term.c.y);
 		return;
 	case '\t':
-		move_to((term.c.x & ~7) + 8, term.c.y);
+		move_to(((term.c.x >> 3) + 1) << 3, term.c.y);
 		return;
 	case '\n' ... '\f':
 		newline();
