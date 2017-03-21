@@ -496,11 +496,6 @@ static void visibility(XEvent *e)
 
 static void focus(XEvent *ev)
 {
-	XFocusChangeEvent *e = &ev->xfocus;
-
-	if (e->mode == NotifyGrab)
-		return;
-
 	xw.focused = ev->type == FocusIn;
 	if (term.focus)
 		dprintf(pty.fd, "\033[%c", xw.focused ? 'I' : 'O');
@@ -563,6 +558,14 @@ static void brelease(XEvent *e)
 		xsel("xsel -pi", true);
 }
 
+static int __attribute__((noreturn)) clean_exit(Display *dpy)
+{
+	for (int i = 0; i < 4; ++i)
+		XftFontClose(dpy, xw.font[i]);
+	XCloseDisplay(dpy);
+	exit(0);
+}
+
 static void (*handler[LASTEvent])(XEvent *) = {
 	[KeyPress] = kpress,
 	[ConfigureNotify] = resize,
@@ -574,21 +577,13 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[ButtonRelease] = brelease,
 };
 
-static void __attribute__((noreturn)) clean_exit(int code)
-{
-	for (int i = 0; i < 4; ++i)
-		XftFontClose(xw.dpy, xw.font[i]);
-	XCloseDisplay(xw.dpy);
-	exit(code);
-}
-
 static char pty_getchar(void)
 {
 	if (pty.c >= pty.end) {
 		pty.c = pty.buf;
 		long result = read(pty.fd, pty.buf, BUFSIZ);
 		if (result < 0)
-			clean_exit(0);
+			clean_exit(xw.dpy);
 		pty.end = pty.buf + result;
 	}
 
@@ -939,6 +934,8 @@ static void __attribute__((noreturn)) run(void)
 int main(int argc, char *argv[])
 {
 	setlocale(LC_CTYPE, "");
+	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
+	XSetIOErrorHandler(clean_exit);
 	create_window();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 	run();
