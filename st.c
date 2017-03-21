@@ -203,12 +203,10 @@ static void scroll(int n)
 	}
 }
 
-static Point ev2point(XButtonEvent *e)
+static Point pixel2cell(int px, int py)
 {
-	int x = (e->x - BORDERPX) / xw.font[0]->max_advance_width;
-	int y = (e->y - BORDERPX) / xw.font[0]->height;
-	LIMIT(x, 0, pty.cols - 1);
-	LIMIT(y, 0, pty.rows - 1);
+	int x = (px - BORDERPX) / xw.font[0]->max_advance_width;
+	int y = (py - BORDERPX) / xw.font[0]->height;
 	return (Point) { x, y + term.scroll };
 }
 
@@ -264,8 +262,8 @@ static void create_window(void)
 	load_fonts(FONTNAME);
 
 	// Set geometry to some arbitrary values while we wait for the resize event
-	xw.width = pty.cols * xw.font[0]->max_advance_width + 2 * BORDERPX;
-	xw.height = pty.rows * xw.font[0]->height + 2 * BORDERPX;
+	xw.width = pty.cols * xw.font[0]->max_advance_width + BORDERPX;
+	xw.height = pty.rows * xw.font[0]->height + BORDERPX;
 
 	// Events
 	Visual *visual = DefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
@@ -407,13 +405,13 @@ static void xsel(char* opts, bool copy)
 		dprintf(pty.fd, "%s", sel_buf);
 	}
 
-	fclose(pipe);
+	pclose(pipe);
 }
 
 static void mousereport(XButtonEvent *e)
 {
 	static Point prev;
-	Point pos = ev2point(e);
+	Point pos = pixel2cell(e->x, e->y);
 	pos.y -= term.scroll;
 
 	if (pos.x > 255 || pos.y > 255)
@@ -497,8 +495,9 @@ static void resize(XEvent *e)
 		return;
 
 	// Update terminal info
-	pty.cols = (u16) (ev->width - 2 * BORDERPX) / xw.font[0]->max_advance_width;
-	pty.rows = (u16) (ev->height - 2 * BORDERPX) / xw.font[0]->height;
+	Point pty_size = pixel2cell(ev->width, ev->height);
+	pty.cols = MIN((u16) pty_size.x, LINE_SIZE - 1);
+	pty.rows = MIN((u16) pty_size.y, HIST_SIZE);
 	term.top = 0;
 	term.bot = pty.rows - 1;
 	move_to(term.c.x, term.c.y);
@@ -542,7 +541,7 @@ static void bmotion(XEvent *e)
 	if (term.report_motion && !(ev->state & ShiftMask)) {
 		mousereport(ev);
 	} else if (ev->state & (Button1Mask | Button3Mask)) {
-		sel.oe = ev2point(ev);
+		sel.oe = pixel2cell(ev->x, ev->y);
 		selnormalize();
 	}
 }
@@ -550,7 +549,7 @@ static void bmotion(XEvent *e)
 static void bpress(XEvent *e)
 {
 	XButtonEvent *ev = &e->xbutton;
-	Point point = ev2point(ev);
+	Point point = pixel2cell(ev->x, ev->y);
 
 	if (term.report_buttons && !(ev->state & ShiftMask))
 		mousereport(ev);
@@ -568,7 +567,7 @@ static void bpress(XEvent *e)
 		break;
 	case Button3:
 		sel.snap = SNAP_LINE;
-		sel.oe = ev2point(ev);
+		sel.oe = point;
 		selnormalize();
 		break;
 	case Button4:
@@ -619,6 +618,7 @@ static void pty_new(char* cmd[])
 {
 	pty.rows = 24;
 	pty.cols = 80;
+
 	switch (forkpty(&pty.fd, 0, 0, &(struct winsize) { 24, 80, 0, 0 })) {
 	case -1:
 		die("forkpty failed\n");
@@ -775,7 +775,7 @@ static void handle_csi()
 		break;
 	case 'c': // DA -- Device Attributes
 		if (*arg == 0)
-			dprintf(pty.fd, "%s", VTIDEN);
+			dprintf(pty.fd, "%s", "\033[?64;15;22c");
 		break;
 	case 'd': // VPA -- Move to <row>
 		move_to(term.c.x, *arg - 1);
@@ -962,6 +962,6 @@ int main(int argc, char *argv[])
 {
 	setlocale(LC_CTYPE, "");
 	create_window();
-	pty_new(argc > 1 ? argv + 1 : (char*[]) { SHELL, NULL });
+	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 	run();
 }
