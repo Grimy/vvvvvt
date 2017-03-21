@@ -4,6 +4,7 @@
 CC = clang
 CPPFLAGS = -D_POSIX_C_SOURCE=200809
 CFLAGS += -g -std=c99 -Weverything -Werror -O3 -fno-inline ${INCS} ${CPPFLAGS}
+CFLAGS += -fsanitize=address,undefined
 CFLAGS += -Wno-sign-conversion -Wno-switch -Wno-gnu-case-range
 CFLAGS += `pkg-config --cflags fontconfig`
 LDFLAGS = -lutil -lX11 -lXft `pkg-config --libs fontconfig`

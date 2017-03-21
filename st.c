@@ -8,7 +8,6 @@
 #include <X11/keysym.h>
 #include <assert.h>
 #include <errno.h>
-#include <fontconfig/fontconfig.h>
 #include <locale.h>
 #include <pty.h>
 #include <signal.h>
@@ -117,12 +116,6 @@ static struct {
 
 static void clear_region(int x1, int y1, int x2, int y2)
 {
-	LIMIT(x1, 0, pty.cols - 1);
-	LIMIT(x2, 0, pty.cols - 1);
-	LIMIT(y1, 0, pty.rows - 1);
-	LIMIT(y2, 0, pty.rows - 1);
-	assert(y1 < y2 || (y1 == y2 && x1 <= x2));
-
 	if (sel.nb.y <= y2 && sel.ne.y >= y1)
 		selclear();
 
@@ -187,7 +180,7 @@ static struct {
 	Display *dpy;
 	Window win;
 	XftFont *font[4];
-	Drawable pixmap;
+	Pixmap pixmap;
 	GC gc;
 	XftDraw *draw;
 	int width, height;
@@ -233,59 +226,33 @@ static bool selected(int x, int y)
 		&& (y != sel.ne.y || x <= sel.ne.x);
 }
 
-static void load_fonts(char *fontstr)
-{
-	if (!FcInit())
-		die("Could not init fontconfig.\n");
-
-	FcPattern *pattern = FcNameParse((FcChar8 *) fontstr);
-	FcResult result;
-
-	for (int i = 0; i < 4; ++i) {
-		FcPatternDel(pattern, FC_SLANT);
-		FcPatternDel(pattern, FC_WEIGHT);
-		FcPatternAddInteger(pattern, FC_SLANT, (i & 2) ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
-		FcPatternAddInteger(pattern, FC_WEIGHT, (i & 1) ? FC_WEIGHT_BOLD : FC_WEIGHT_NORMAL);
-		FcPattern *match = XftFontMatch(xw.dpy, DefaultScreen(xw.dpy), pattern, &result);
-		xw.font[i] = XftFontOpenPattern(xw.dpy, match);
-		FcPatternDestroy(match);
-	}
-
-	FcPatternDestroy(pattern);
-}
-
 static void create_window(void)
 {
 	if (!(xw.dpy = XOpenDisplay(0)))
-		die("Can't open display\n");
+		die("Failed to open display\n");
 
-	load_fonts(FONTNAME);
-
-	// Set geometry to some arbitrary values while we wait for the resize event
-	xw.width = pty.cols * xw.font[0]->max_advance_width + BORDERPX;
-	xw.height = pty.rows * xw.font[0]->height + BORDERPX;
+	int screen = DefaultScreen(xw.dpy);
+	xw.font[0] = XftFontOpenName(xw.dpy, screen, FONTNAME);
+	xw.font[1] = XftFontOpenName(xw.dpy, screen, FONTNAME ":style=bold");
+	xw.font[2] = XftFontOpenName(xw.dpy, screen, FONTNAME ":style=italic");
+	xw.font[3] = XftFontOpenName(xw.dpy, screen, FONTNAME ":style=bold italic");
 
 	// Events
-	Visual *visual = DefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
-	XSetWindowAttributes attrs = {
-		.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask
-			| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask,
-	};
+	XSetWindowAttributes attrs;
+	attrs.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask
+		| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 
-	Window parent = XRootWindow(xw.dpy, DefaultScreen(xw.dpy));
-	xw.win = XCreateWindow(xw.dpy, parent, 0, 0, xw.width, xw.height, 0,
-			CopyFromParent, InputOutput, visual, CWEventMask, &attrs);
+	// Create and map the window
+	Window parent = XRootWindow(xw.dpy, screen);
+	xw.win = XCreateWindow(xw.dpy, parent, 0, 0, 1, 1, 0, CopyFromParent, InputOutput,
+			DefaultVisual(xw.dpy, screen), CWEventMask, &attrs);
+	XMapWindow(xw.dpy, xw.win);
+	XStoreName(xw.dpy, xw.win, "st");
 
 	// Graphic context
 	XGCValues gcvalues = { .graphics_exposures = False };
 	xw.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures, &gcvalues);
-	xw.pixmap = XCreatePixmap(xw.dpy, xw.win, xw.width, xw.height, 24);
-	xw.draw = XftDrawCreate(xw.dpy, xw.pixmap, visual, CopyFromParent);
 	XDefineCursor(xw.dpy, xw.win, XCreateFontCursor(xw.dpy, XC_xterm));
-
-	// Various
-	XMapWindow(xw.dpy, xw.win);
-	XStoreName(xw.dpy, xw.win, "st");
 }
 
 static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
@@ -496,6 +463,7 @@ static void resize(XEvent *e)
 
 	// Update terminal info
 	Point pty_size = pixel2cell(ev->width, ev->height);
+	pty_size.y -= term.scroll;
 	pty.cols = MIN((u16) pty_size.x, LINE_SIZE - 1);
 	pty.rows = MIN((u16) pty_size.y, HIST_SIZE);
 	term.top = 0;
@@ -503,12 +471,16 @@ static void resize(XEvent *e)
 	move_to(term.c.x, term.c.y);
 
 	// Update X window data
+	if (xw.pixmap)
+		XFreePixmap(xw.dpy, xw.pixmap);
+	if (xw.draw)
+		XftDrawDestroy(xw.draw);
+
+	Visual *visual = DefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
 	xw.width = ev->width;
 	xw.height = ev->height;
-	XFreePixmap(xw.dpy, xw.pixmap);
 	xw.pixmap = XCreatePixmap(xw.dpy, xw.win, xw.width, xw.height, 24);
-	XftDrawChange(xw.draw, xw.pixmap);
-	XftDrawRect(xw.draw, colors, 0, 0, xw.width, xw.height);
+	xw.draw = XftDrawCreate(xw.dpy, xw.pixmap, visual, CopyFromParent);
 
 	// Send our size to the pty driver so that applications can query it
 	struct winsize w = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
@@ -602,13 +574,22 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[ButtonRelease] = brelease,
 };
 
+static void __attribute__((noreturn)) clean_exit(int code)
+{
+	for (int i = 0; i < 4; ++i)
+		XftFontClose(xw.dpy, xw.font[i]);
+	XCloseDisplay(xw.dpy);
+	exit(code);
+}
+
 static char pty_getchar(void)
 {
 	if (pty.c >= pty.end) {
 		pty.c = pty.buf;
-		pty.end = pty.buf + read(pty.fd, pty.buf, BUFSIZ);
-		if (pty.end < pty.buf)
-			exit(0);
+		long result = read(pty.fd, pty.buf, BUFSIZ);
+		if (result < 0)
+			clean_exit(0);
+		pty.end = pty.buf + result;
 	}
 
 	return *pty.c++;
@@ -616,10 +597,7 @@ static char pty_getchar(void)
 
 static void pty_new(char* cmd[])
 {
-	pty.rows = 24;
-	pty.cols = 80;
-
-	switch (forkpty(&pty.fd, 0, 0, &(struct winsize) { 24, 80, 0, 0 })) {
+	switch (forkpty(&pty.fd, 0, 0, 0)) {
 	case -1:
 		die("forkpty failed\n");
 	case 0:
