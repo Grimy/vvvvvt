@@ -112,6 +112,19 @@ static struct {
 	bool alt, hide, focus, line_drawing;  // terminal mode flags
 } term;
 
+// Drawing Context
+static struct {
+	Display *dpy;
+	Window win;
+	XftFont *font[4];
+	Pixmap pixmap;
+	GC gc;
+	XftDraw *draw;
+	int width, height;
+	bool visible;
+	bool focused;
+} xw;
+
 #define selclear() (sel.ne.y = -1)
 
 static void clear_region(int x1, int y1, int x2, int y2)
@@ -174,19 +187,6 @@ static void newline()
 		move_region(term.bot, pty.rows - 1, -1);
 	}
 }
-
-// Drawing Context
-static struct {
-	Display *dpy;
-	Window win;
-	XftFont *font[4];
-	Pixmap pixmap;
-	GC gc;
-	XftDraw *draw;
-	int width, height;
-	bool visible;
-	bool focused;
-} xw;
 
 static void scroll(int n)
 {
@@ -913,7 +913,7 @@ static void __attribute__((noreturn)) run(void)
 			die("select failed: %s\n", strerror(errno));
 		dirty |= result > 0;
 
-		if (FD_ISSET(pty.fd, &read_fds)) {
+		if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
 			term.scroll = term.lines;
 			tputc(pty_getchar());
 			while (pty.c < pty.end)

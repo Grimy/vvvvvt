@@ -2,20 +2,18 @@
 # See LICENSE file for copyright and license details.
 
 CC = clang
-CPPFLAGS = -D_POSIX_C_SOURCE=200809
-CFLAGS += -g -std=c99 -Weverything -Werror -O3 -fno-inline ${INCS} ${CPPFLAGS}
-CFLAGS += -fsanitize=address,undefined
+CFLAGS += -std=c99 -D_POSIX_C_SOURCE=200809 -Weverything -Werror
 CFLAGS += -Wno-sign-conversion -Wno-switch -Wno-gnu-case-range
-CFLAGS += `pkg-config --cflags fontconfig`
-LDFLAGS = -lutil -lX11 -lXft `pkg-config --libs fontconfig`
+CFLAGS += -g -O3 -fno-inline -fsanitize=address,undefined
+CFLAGS += -lutil -lX11 -lXft `pkg-config --cflags --libs fontconfig`
 
 st: st.c colors.c config.h Makefile
 	@echo CC $@
-	@$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
+	@clang $(CFLAGS) $< -o $@
 
 st-fuzz: st.c colors.c config.h Makefile
 	@echo CC $@
-	afl-clang $(CFLAGS) $(LDFLAGS) $< -o $@
+	@afl-clang $(CFLAGS) $< -o $@
 
 colors.c: colors.pl
 	./$^ > $@
