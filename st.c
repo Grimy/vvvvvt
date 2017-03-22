@@ -20,7 +20,12 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "config.h"
+// Config
+#define LINE_SIZE 256
+#define HIST_SIZE 2048
+#define FPS 60
+#define DEFAULTFG 15
+#define BORDERPX 2
 
 // Macros
 #define LEN(a)              (sizeof(a) / sizeof(*(a)))
@@ -241,11 +246,16 @@ static void create_window(void)
 		die("Failed to open display\n");
 
 	// Load fonts
-	int screen = DefaultScreen(xw.dpy);
-	xw.font[0] = XftFontOpenName(xw.dpy, screen, FONTNAME);
-	xw.font[1] = XftFontOpenName(xw.dpy, screen, FONTNAME ":style=bold");
-	xw.font[2] = XftFontOpenName(xw.dpy, screen, FONTNAME ":style=italic");
-	xw.font[3] = XftFontOpenName(xw.dpy, screen, FONTNAME ":style=bold italic");
+	char *face_name = XGetDefault(xw.dpy, "st", "faceName");
+	if (!face_name)
+		face_name = "mono";
+	char font_name[128];
+	char *style[] = { "", ":style=bold", ":style=italic", ":style=bold italic" };
+	for (int i = 0; i < 4; ++i) {
+		strcpy(font_name, face_name);
+		strcat(font_name, style[i]);
+		xw.font[i] = XftFontOpenName(xw.dpy, DefaultScreen(xw.dpy), font_name);
+	}
 
 	// Events
 	XSetIOErrorHandler(clean_exit);
@@ -254,7 +264,7 @@ static void create_window(void)
 	attrs.event_mask |= KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 
 	// Create and map the window
-	Window parent = XRootWindow(xw.dpy, screen);
+	Window parent = XRootWindow(xw.dpy, DefaultScreen(xw.dpy));
 	xw.win = XCreateSimpleWindow(xw.dpy, parent, 0, 0, 1, 1, 0, CopyFromParent, CopyFromParent);
 	XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &attrs);
 	XMapWindow(xw.dpy, xw.win);
