@@ -20,7 +20,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "colors.c"
 #include "config.h"
 
 // Macros
@@ -124,6 +123,8 @@ static struct {
 	bool visible;
 	bool focused;
 } xw;
+
+static XftColor colors[256];
 
 #define selclear() (sel.ne.y = -1)
 
@@ -938,18 +939,36 @@ static void __attribute__((noreturn)) run(void)
 	}
 }
 
+static u16 default_color(u16 i, int rgb)
+{
+	if (i < 16) // 0 ... 15: 16 system colors
+		return 85 * ((i >> rgb & 1) * 2 + (i >> 3));
+
+	if (i >= 232) // 232 ... 255: 24 grayscale colors
+		return 9 * (i - 232) + (rgb == 1 ? 30 : 34);
+
+	// 16 ... 231: 6x6x6 color cube
+	i = (i - 16) / (u16[]) { 36, 6, 1 } [rgb] % 6;
+	return i ? 55 + 40 * i : 0;
+}
+
 static void read_resources() {
 	char color[9] = "color";
+	u16 r, g, b;
+
 	for (int i = 0; i < 256; ++i) {
 		sprintf(color + 5, "%d", i);
 		char *value = XGetDefault(xw.dpy, "st", color);
 		if (value) {
-			u16 r, g, b;
 			sscanf(value, "#%02hx%02hx%02hx", &r, &g, &b);
-			colors[i].color.red = r * 257;
-			colors[i].color.green = g * 257;
-			colors[i].color.blue = b * 257;
+		} else {
+			r = default_color((u16) i, 0);
+			g = default_color((u16) i, 1);
+			b = default_color((u16) i, 2);
 		}
+		colors[i].color.red = r * 257;
+		colors[i].color.green = g * 257;
+		colors[i].color.blue = b * 257;
 	}
 }
 
