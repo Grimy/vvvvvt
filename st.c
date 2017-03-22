@@ -963,22 +963,21 @@ static u16 default_color(u16 i, int rgb)
 }
 
 static void read_resources() {
-	char color[9] = "color";
-	u16 r, g, b;
+	Colormap colormap = DefaultColormap(xw.dpy, DefaultScreen(xw.dpy));
+	char color_name[9] = "color";
 
 	for (int i = 0; i < 256; ++i) {
-		sprintf(color + 5, "%d", i);
-		char *value = XGetDefault(xw.dpy, "st", color);
+		sprintf(color_name + 5, "%d", i);
+		char *value = XGetDefault(xw.dpy, "st", color_name);
+		XColor color;
 		if (value) {
-			sscanf(value, "#%02hx%02hx%02hx", &r, &g, &b);
+			XLookupColor(xw.dpy, colormap, value, &color, &color);
 		} else {
-			r = default_color((u16) i, 0);
-			g = default_color((u16) i, 1);
-			b = default_color((u16) i, 2);
+			color.red =   default_color((u16) i, 0) * 257;
+			color.green = default_color((u16) i, 1) * 257;
+			color.blue =  default_color((u16) i, 2) * 257;
 		}
-		colors[i].color.red = r * 257;
-		colors[i].color.green = g * 257;
-		colors[i].color.blue = b * 257;
+		colors[i] = (XftColor) { 0, { color.red, color.green, color.blue, 0xffff } };
 	}
 }
 
