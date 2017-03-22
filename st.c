@@ -938,11 +938,27 @@ static void __attribute__((noreturn)) run(void)
 	}
 }
 
+static void read_resources() {
+	char color[9] = "color";
+	for (int i = 0; i < 256; ++i) {
+		sprintf(color + 5, "%d", i);
+		char *value = XGetDefault(xw.dpy, "st", color);
+		if (value) {
+			u16 r, g, b;
+			sscanf(value, "#%02hx%02hx%02hx", &r, &g, &b);
+			colors[i].color.red = r * 257;
+			colors[i].color.green = g * 257;
+			colors[i].color.blue = b * 257;
+		}
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	setlocale(LC_CTYPE, "");
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
 	create_window();
+	read_resources();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 	run();
 }
