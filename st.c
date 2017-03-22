@@ -226,11 +226,20 @@ static bool selected(int x, int y)
 		&& (y != sel.ne.y || x <= sel.ne.x);
 }
 
+static int __attribute__((noreturn)) clean_exit(Display *dpy)
+{
+	for (int i = 0; i < 4; ++i)
+		XftFontClose(dpy, xw.font[i]);
+	XCloseDisplay(dpy);
+	exit(0);
+}
+
 static void create_window(void)
 {
 	if (!(xw.dpy = XOpenDisplay(0)))
 		die("Failed to open display\n");
 
+	// Load fonts
 	int screen = DefaultScreen(xw.dpy);
 	xw.font[0] = XftFontOpenName(xw.dpy, screen, FONTNAME);
 	xw.font[1] = XftFontOpenName(xw.dpy, screen, FONTNAME ":style=bold");
@@ -238,14 +247,15 @@ static void create_window(void)
 	xw.font[3] = XftFontOpenName(xw.dpy, screen, FONTNAME ":style=bold italic");
 
 	// Events
+	XSetIOErrorHandler(clean_exit);
 	XSetWindowAttributes attrs;
-	attrs.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask
-		| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
+	attrs.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask;
+	attrs.event_mask |= KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 
 	// Create and map the window
 	Window parent = XRootWindow(xw.dpy, screen);
-	xw.win = XCreateWindow(xw.dpy, parent, 0, 0, 1, 1, 0, CopyFromParent, InputOutput,
-			DefaultVisual(xw.dpy, screen), CWEventMask, &attrs);
+	xw.win = XCreateSimpleWindow(xw.dpy, parent, 0, 0, 1, 1, 0, CopyFromParent, CopyFromParent);
+	XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &attrs);
 	XMapWindow(xw.dpy, xw.win);
 	XStoreName(xw.dpy, xw.win, "st");
 
@@ -260,29 +270,34 @@ static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 	bool bold = (glyph.mode & ATTR_BOLD) != 0;
 	bool italic = (glyph.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = xw.font[bold + 2 * italic];
-	const XftColor *fg = &colors[glyph.fg ? glyph.fg : DEFAULTFG];
-	const XftColor *bg = &colors[glyph.bg];
+	XftColor fg = colors[glyph.fg ? glyph.fg : DEFAULTFG];
+	XftColor bg = colors[glyph.bg];
 	int baseline = y + font->ascent;
 	int width = len * font->max_advance_width;
+
+	if (glyph.mode & ATTR_INVISIBLE) {
+		fg = bg;
+	} else if (glyph.mode & ATTR_FAINT) {
+		fg.color.red /= 2;
+		fg.color.green /= 2;
+		fg.color.blue /= 2;
+	}
 
 	if (glyph.mode & ATTR_REVERSE)
 		SWAP(fg, bg);
 
-	if (glyph.mode & ATTR_INVISIBLE)
-		fg = bg;
-
 	// Draw the background, then the text, then decorations
-	XftDrawRect(xw.draw, bg, x, y, width, font->height);
-	XftDrawStringUtf8(xw.draw, fg, font, x, baseline, text, len);
+	XftDrawRect(xw.draw, &bg, x, y, width, font->height);
+	XftDrawStringUtf8(xw.draw, &fg, font, x, baseline, text, len);
 
 	if (glyph.mode & ATTR_UNDERLINE)
-		XftDrawRect(xw.draw, fg, x, baseline + 1, width, 1);
+		XftDrawRect(xw.draw, &fg, x, baseline + 1, width, 1);
 
 	if (glyph.mode & ATTR_STRUCK)
-		XftDrawRect(xw.draw, fg, x, (2 * baseline + y) / 3, width, 1);
+		XftDrawRect(xw.draw, &fg, x, (2 * baseline + y) / 3, width, 1);
 
 	if (glyph.mode & ATTR_BAR)
-		XftDrawRect(xw.draw, fg, x, y, 2, font->height);
+		XftDrawRect(xw.draw, &fg, x, y, 2, font->height);
 }
 
 // Draws the glyph at the given terminal coordinates.
@@ -556,14 +571,6 @@ static void brelease(XEvent *e)
 		xsel("xsel -po", false);
 	else if (ev->button == Button1 || ev->button == Button3)
 		xsel("xsel -pi", true);
-}
-
-static int __attribute__((noreturn)) clean_exit(Display *dpy)
-{
-	for (int i = 0; i < 4; ++i)
-		XftFontClose(dpy, xw.font[i]);
-	XCloseDisplay(dpy);
-	exit(0);
 }
 
 static void (*handler[LASTEvent])(XEvent *) = {
@@ -935,7 +942,6 @@ int main(int argc, char *argv[])
 {
 	setlocale(LC_CTYPE, "");
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
-	XSetIOErrorHandler(clean_exit);
 	create_window();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 	run();
