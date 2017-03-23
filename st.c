@@ -951,11 +951,18 @@ static void __attribute__((noreturn)) run(void)
 
 static u16 default_color(u16 i, int rgb)
 {
+	u16 theme[] = {
+		232, 160, 34, 136, 33, 164, 44, 244,
+		240, 202, 85, 220, 99, 206, 75, 255,
+	};
+	// 4 0 0  0 3 0  3 2 0  0 2 5  4 0 4  0 4 4
+	// 5 1 0  1 5 3  5 4 0  2 1 5  5 1 4  1 3 5
+
 	if (i < 16) // 0 ... 15: 16 system colors
-		return 85 * ((i >> rgb & 1) * 2 + (i >> 3));
+		i = theme[i];
 
 	if (i >= 232) // 232 ... 255: 24 grayscale colors
-		return 9 * (i - 232) + (rgb == 1 ? 30 : 34);
+		return 10 * (i - 232) + (u16[]) { 10, 5, 15 } [rgb];
 
 	// 16 ... 231: 6x6x6 color cube
 	i = (i - 16) / (u16[]) { 36, 6, 1 } [rgb] % 6;
