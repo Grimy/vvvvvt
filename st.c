@@ -952,20 +952,18 @@ static void __attribute__((noreturn)) run(void)
 static u16 default_color(u16 i, int rgb)
 {
 	u16 theme[] = {
-		232, 160, 34, 136, 33, 164, 44, 244,
-		240, 202, 85, 220, 99, 206, 75, 255,
+		0000, 0710, 0150, 0540, 0037, 0606, 0066, 0444,
+		0222, 0730, 0275, 0760, 0427, 0727, 0057, 0777,
 	};
-	// 4 0 0  0 3 0  3 2 0  0 2 5  4 0 4  0 4 4
-	// 5 1 0  1 5 3  5 4 0  2 1 5  5 1 4  1 3 5
 
 	if (i < 16) // 0 ... 15: 16 system colors
-		i = theme[i];
+		return 3 + 36 * ((theme[i] >> 3 * rgb) & 7);
 
 	if (i >= 232) // 232 ... 255: 24 grayscale colors
-		return 10 * (i - 232) + (u16[]) { 10, 5, 15 } [rgb];
+		return 10 * (i - 232) + (u16[]) { 15, 5, 10 } [rgb];
 
 	// 16 ... 231: 6x6x6 color cube
-	i = (i - 16) / (u16[]) { 36, 6, 1 } [rgb] % 6;
+	i = (i - 16) / (u16[]) { 1, 6, 36 } [rgb] % 6;
 	return i ? 55 + 40 * i : 0;
 }
 
@@ -980,9 +978,9 @@ static void read_resources() {
 		if (value) {
 			XLookupColor(xw.dpy, colormap, value, &color, &color);
 		} else {
-			color.red =   default_color((u16) i, 0) * 257;
+			color.red =   default_color((u16) i, 2) * 257;
 			color.green = default_color((u16) i, 1) * 257;
-			color.blue =  default_color((u16) i, 2) * 257;
+			color.blue =  default_color((u16) i, 0) * 257;
 		}
 		colors[i] = (XftColor) { 0, { color.red, color.green, color.blue, 0xffff } };
 	}
