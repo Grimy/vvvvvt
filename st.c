@@ -25,7 +25,6 @@
 #define HIST_SIZE 2048
 #define FPS 60
 #define DEFAULTFG 15
-#define BORDERPX 2
 
 // Macros
 #define LEN(a)              (sizeof(a) / sizeof(*(a)))
@@ -114,6 +113,7 @@ static struct {
 	u8 charset[4];
 	bool report_buttons, report_motion;
 	bool alt, hide, focus, line_drawing;  // terminal mode flags
+	bool appcursor;
 } term;
 
 // Drawing Context
@@ -124,9 +124,12 @@ static struct {
 	Pixmap pixmap;
 	GC gc;
 	XftDraw *draw;
+	char *font_name;
 	int width, height;
-	bool visible;
-	bool focused;
+	int font_height, font_width;
+	int border;
+	bool visible: 16;
+	bool focused: 16;
 } xw;
 
 static XftColor colors[256];
@@ -204,8 +207,8 @@ static void scroll(int n)
 
 static Point pixel2cell(int px, int py)
 {
-	int x = (px - BORDERPX) / xw.font[0]->max_advance_width;
-	int y = (py - BORDERPX) / xw.font[0]->height;
+	int x = (px - xw.border) / xw.font_width;
+	int y = (py - xw.border) / xw.font_height;
 	return (Point) { x, y + term.scroll };
 }
 
@@ -249,6 +252,7 @@ static void create_window(void)
 	char *face_name = XGetDefault(xw.dpy, "st", "faceName");
 	if (!face_name)
 		face_name = "mono";
+
 	char font_name[128];
 	char *style[] = { "", ":style=bold", ":style=italic", ":style=bold italic" };
 	for (int i = 0; i < 4; ++i) {
@@ -256,6 +260,16 @@ static void create_window(void)
 		strcat(font_name, style[i]);
 		xw.font[i] = XftFontOpenName(xw.dpy, DefaultScreen(xw.dpy), font_name);
 	}
+
+	xw.font_height = xw.font[0]->height + 1;
+	xw.font_width = xw.font[0]->max_advance_width;
+
+	char *scale_height = XGetDefault(xw.dpy, "st", "scaleHeight");
+	if (scale_height)
+		xw.font_height = (int) (xw.font_height * atof(scale_height) + .999);
+
+	char *border = XGetDefault(xw.dpy, "st", "borderWidth");
+	xw.border = border ? atoi(border) : 2;
 
 	// Events
 	XSetIOErrorHandler(clean_exit);
@@ -284,7 +298,7 @@ static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 	XftColor fg = colors[glyph.fg ? glyph.fg : DEFAULTFG];
 	XftColor bg = colors[glyph.bg];
 	int baseline = y + font->ascent;
-	int width = len * font->max_advance_width;
+	int width = len * xw.font_width;
 
 	if (glyph.mode & ATTR_INVISIBLE) {
 		fg = bg;
@@ -298,7 +312,7 @@ static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 		SWAP(fg, bg);
 
 	// Draw the background, then the text, then decorations
-	XftDrawRect(xw.draw, &bg, x, y, width, font->height);
+	XftDrawRect(xw.draw, &bg, x, y, width, xw.font_height);
 	XftDrawStringUtf8(xw.draw, &fg, font, x, baseline, text, len);
 
 	if (glyph.mode & ATTR_UNDERLINE)
@@ -308,7 +322,7 @@ static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
 		XftDrawRect(xw.draw, &fg, x, (2 * baseline + y) / 3, width, 1);
 
 	if (glyph.mode & ATTR_BAR)
-		XftDrawRect(xw.draw, &fg, x, y, 2, font->height);
+		XftDrawRect(xw.draw, &fg, x, y, 2, xw.font_height);
 }
 
 // Draws the glyph at the given terminal coordinates.
@@ -337,8 +351,8 @@ static void draw_glyph(int x, int y)
 	if (x == 0 || diff) {
 		draw_text(prev, buf, len, draw_x, draw_y);
 		len = 0;
-		draw_x = BORDERPX + x * xw.font[0]->max_advance_width;
-		draw_y = BORDERPX + y * xw.font[0]->height;
+		draw_x = xw.border + x * xw.font_width;
+		draw_y = xw.border + y * xw.font_height;
 		prev = glyph;
 	}
 
@@ -401,6 +415,8 @@ static void xsel(char* opts, bool copy)
 	pclose(pipe);
 }
 
+#define mod_code(s) (!!((s) & ShiftMask) | !!((s) & Mod1Mask) << 1 | !!((s) & ControlMask) << 2)
+
 static void mousereport(XButtonEvent *e)
 {
 	static Point prev;
@@ -416,40 +432,48 @@ static void mousereport(XButtonEvent *e)
 	prev = pos;
 
 	int button = e->type == ButtonRelease ? 3 : e->button - Button1;
-	button += (e->state & ShiftMask  ) ? 4  : 0;
-	button += (e->state & Mod4Mask   ) ? 8  : 0;
-	button += (e->state & ControlMask) ? 16 : 0;
+	button += mod_code(e->state) << 2;
 
 	dprintf(pty.fd, "\033[M%c%c%c", 32 + button, 33 + pos.x, 33 + pos.y);
 }
 
-static char* kmap(KeySym keysym, bool ctrl, char* string)
+static char* format(char *c, int state)
+{
+	static char buf[8];
+	if (state)
+		sprintf(buf, "\033[%c;%d%s", c[1] ? *c++ : '1', state + 1, c);
+	else
+		sprintf(buf, "\033%c%s", term.appcursor && !c[1] ? 'O' : '[', c);
+	return buf;
+}
+
+static char* kmap(KeySym keysym, int state, char* string)
 {
 	switch (keysym) {
 	case XK_Up:
-		return ctrl ? "\033[1;5A" : "\033OA";
+		return format("A", mod_code(state));
 	case XK_Down:
-		return ctrl ? "\033[1;5B" : "\033OB";
+		return format("B", mod_code(state));
 	case XK_Right:
-		return ctrl ? "\033[1;5C" : "\033OC";
+		return format("C", mod_code(state));
 	case XK_Left:
-		return ctrl ? "\033[1;5D" : "\033OD";
+		return format("D", mod_code(state));
+	case XK_End:
+		return format("F", mod_code(state));
+	case XK_Home:
+		return format("H", mod_code(state));
+	case XK_Insert:
+		return format("2~", mod_code(state));
+	case XK_Delete:
+		return format("3~", mod_code(state));
+	case XK_Prior:
+		return format("5~", mod_code(state));
+	case XK_Next:
+		return format("6~", mod_code(state));
 	case XK_ISO_Left_Tab:
 		return "\033[Z";
 	case XK_BackSpace:
-		return ctrl ? "\027" : "\177";
-	case XK_Home:
-		return "\033[1~";
-	case XK_Insert:
-		return "\033[2~";
-	case XK_Delete:
-		return ctrl ? "\033[3;5~" : "\033[3~";
-	case XK_End:
-		return "\033[4~";
-	case XK_Prior:
-		return "\033[5~";
-	case XK_Next:
-		return "\033[6~";
+		return state & ControlMask ? "\027" : "\177";
 	default:
 		return string;
 	}
@@ -465,7 +489,6 @@ static void kpress(XEvent *e)
 	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
 		selclear();
 
-	// Internal shortcuts
 	if (keysym == XK_Insert && (ev->state & ShiftMask))
 		xsel("xsel -po", false);
 	else if (keysym == XK_Prior && (ev->state & ShiftMask))
@@ -477,7 +500,7 @@ static void kpress(XEvent *e)
 	else if (keysym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
 		xsel("xsel -bo", false);
 	else
-		dprintf(pty.fd, "%s", kmap(keysym, ev->state & ControlMask, buf));
+		dprintf(pty.fd, "%s", kmap(keysym, ev->state, buf));
 }
 
 static void resize(XEvent *e)
@@ -659,6 +682,8 @@ static int set_attr(int *attr)
 static void set_mode(bool set, int mode)
 {
 	switch (mode) {
+	case 1:    // Application cursor keys
+		term.appcursor = set;
 	case 25:   // Show cursor
 		term.hide = !set;
 		break;
@@ -953,37 +978,39 @@ static void __attribute__((noreturn)) run(void)
 static u16 default_color(u16 i, int rgb)
 {
 	u16 theme[] = {
-		0000, 0610, 0151, 0540, 0037, 0606, 0066, 0444,
-		0222, 0730, 0275, 0760, 0427, 0727, 0057, 0777,
+		0000, 0610, 0151, 0540, 0037, 0606, 0066, 0333,
+		0222, 0730, 0471, 0750, 0427, 0727, 0057, 0777,
 	};
 
 	if (i < 16) // 0 ... 15: 16 system colors
 		return 3 + 36 * ((theme[i] >> 3 * rgb) & 7);
 
 	if (i >= 232) // 232 ... 255: 24 grayscale colors
-		return 10 * (i - 232) + (u16[]) { 15, 5, 10 } [rgb];
+		return 10 * (i - 232) + (u16[]) { 15, 5, 5 } [rgb];
 
 	// 16 ... 231: 6x6x6 color cube
 	i = (i - 16) / (u16[]) { 1, 6, 36 } [rgb] % 6;
-	return i ? 55 + 40 * i : 0;
+	return 17 * (u16[]) { 0, 6, 8, 11, 13, 15 } [i];
 }
 
-static void read_resources() {
+static void load_colors() {
 	Colormap colormap = DefaultColormap(xw.dpy, DefaultScreen(xw.dpy));
 	char color_name[9] = "color";
+	char *value;
 
-	for (int i = 0; i < 256; ++i) {
+	for (u16 i = 0; i < 256; ++i) {
 		sprintf(color_name + 5, "%d", i);
-		char *value = XGetDefault(xw.dpy, "st", color_name);
-		XColor color;
-		if (value) {
-			XLookupColor(xw.dpy, colormap, value, &color, &color);
+		XColor *color = (XColor*) &colors[i];
+
+		if ((value = XGetDefault(xw.dpy, "st", color_name))) {
+			XLookupColor(xw.dpy, colormap, value, color, color);
 		} else {
-			color.red =   default_color((u16) i, 2) * 257;
-			color.green = default_color((u16) i, 1) * 257;
-			color.blue =  default_color((u16) i, 0) * 257;
+			color->red   = default_color(i, 2) * 257;
+			color->green = default_color(i, 1) * 257;
+			color->blue  = default_color(i, 0) * 257;
 		}
-		colors[i] = (XftColor) { 0, { color.red, color.green, color.blue, 0xffff } };
+
+		colors[i].color.alpha = 0xffff;
 	}
 }
 
@@ -992,7 +1019,7 @@ int main(int argc, char *argv[])
 	setlocale(LC_CTYPE, "");
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
 	create_window();
-	read_resources();
+	load_colors();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 	run();
 }
