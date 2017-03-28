@@ -890,6 +890,11 @@ static void tputc(u8 u)
 		// FALLTHROUGH
 	case ' ' ... '~':
 	case 192 ... 255:
+		if (term.c.x == pty.cols) {
+			newline();
+			term.c.x = 0;
+		}
+
 		glyph = &TLINE(term.c.y)[term.c.x];
 		*glyph = term.c.attr;
 		glyph->u[0] = u;
@@ -900,10 +905,6 @@ static void tputc(u8 u)
 			memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
 
 		++term.c.x;
-		if (term.c.x == pty.cols) {
-			newline();
-			term.c.x = 0;
-		}
 	}
 }
 
@@ -952,7 +953,7 @@ static void __attribute__((noreturn)) run(void)
 static u16 default_color(u16 i, int rgb)
 {
 	u16 theme[] = {
-		0000, 0710, 0150, 0540, 0037, 0606, 0066, 0444,
+		0000, 0610, 0151, 0540, 0037, 0606, 0066, 0444,
 		0222, 0730, 0275, 0760, 0427, 0727, 0057, 0777,
 	};
 
