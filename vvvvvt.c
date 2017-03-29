@@ -1,4 +1,5 @@
-/* See LICENSE file for copyright and license details. */
+// vvvvvt - varicolored vernacular vivacious verisimilar virtual terminal
+// See LICENSE file for copyright and license details.
 
 #include <X11/X.h>
 #include <X11/Xft/Xft.h>
@@ -38,7 +39,7 @@
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
 
-#define IS_DELIM(c)         (strchr(" <>'`\"(){}", *(c)))
+#define IS_DELIM(c)         (strchr(" <>()[]{}'`\"", *(c)))
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 #define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x >= (b).x))
 
@@ -242,16 +243,19 @@ static int __attribute__((noreturn)) clean_exit(Display *dpy)
 	exit(0);
 }
 
+static char* get_resource(char* resource, char* fallback)
+{
+	char* result = XGetDefault(xw.dpy, "vvvvvt", resource);
+	return result ? result : fallback;
+}
+
 static void create_window(void)
 {
 	if (!(xw.dpy = XOpenDisplay(0)))
 		die("Failed to open display\n");
 
 	// Load fonts
-	char *face_name = XGetDefault(xw.dpy, "st", "faceName");
-	if (!face_name)
-		face_name = "mono";
-
+	char *face_name = get_resource("faceName", "mono");
 	char font_name[128];
 	char *style[] = { "", ":style=bold", ":style=italic", ":style=bold italic" };
 	for (int i = 0; i < 4; ++i) {
@@ -260,15 +264,10 @@ static void create_window(void)
 		xw.font[i] = XftFontOpenName(xw.dpy, DefaultScreen(xw.dpy), font_name);
 	}
 
-	xw.font_height = xw.font[0]->height + 1;
+	double scale_height = atof(get_resource("scaleHeight", "1"));
+	xw.font_height = (int) ((xw.font[0]->height + 1) * scale_height + .999);
 	xw.font_width = xw.font[0]->max_advance_width;
-
-	char *scale_height = XGetDefault(xw.dpy, "st", "scaleHeight");
-	if (scale_height)
-		xw.font_height = (int) (xw.font_height * atof(scale_height) + .999);
-
-	char *border = XGetDefault(xw.dpy, "st", "borderWidth");
-	xw.border = border ? atoi(border) : 2;
+	xw.border = atoi(get_resource("borderWidth", "2"));
 
 	// Events
 	XSetIOErrorHandler(clean_exit);
@@ -281,7 +280,7 @@ static void create_window(void)
 	xw.win = XCreateSimpleWindow(xw.dpy, parent, 0, 0, 1, 1, 0, CopyFromParent, CopyFromParent);
 	XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &attrs);
 	XMapWindow(xw.dpy, xw.win);
-	XStoreName(xw.dpy, xw.win, "st");
+	XStoreName(xw.dpy, xw.win, "vvvvvt");
 
 	// Graphic context
 	XGCValues gcvalues = { .graphics_exposures = False };
@@ -976,20 +975,13 @@ static u16 default_color(u16 i, int rgb)
 static void load_colors() {
 	Colormap colormap = DefaultColormap(xw.dpy, DefaultScreen(xw.dpy));
 	char color_name[9] = "color";
-	char *value;
+	char def[8] = "";
 
 	for (u16 i = 0; i < 256; ++i) {
 		sprintf(color_name + 5, "%d", i);
+		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
 		XColor *color = (XColor*) &colors[i];
-
-		if ((value = XGetDefault(xw.dpy, "st", color_name))) {
-			XLookupColor(xw.dpy, colormap, value, color, color);
-		} else {
-			color->red   = default_color(i, 2) * 257;
-			color->green = default_color(i, 1) * 257;
-			color->blue  = default_color(i, 0) * 257;
-		}
-
+		XLookupColor(xw.dpy, colormap, get_resource(color_name, def), color, color);
 		colors[i].color.alpha = 0xffff;
 	}
 }

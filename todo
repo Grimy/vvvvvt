@@ -1,0 +1,5 @@
+* Black screen after re-focusing?
+* handle reverseVideo
+* handle metaSendsEscape
+* handle backarrowKey
+* handle saveLines
