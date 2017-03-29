@@ -111,9 +111,8 @@ static struct {
 	int bot;                              // bottom scroll limit
 	int cursor_style;
 	u8 charset[4];
-	bool report_buttons, report_motion;
-	bool alt, hide, focus, line_drawing;  // terminal mode flags
-	bool appcursor;
+	bool report_buttons, report_motion, report_focus;
+	bool alt, hide, appcursor, line_drawing;
 } term;
 
 // Drawing Context
@@ -155,7 +154,7 @@ static void move_region(int start, int end, int diff) {
 	int last = end - diff + step;
 	for (int y = start; y != last; y += step)
 		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
-	clear_region(0, MIN(last, end), pty.cols - 1, MAX(last, end));
+	clear_region(0, MIN(last, end), LINE_SIZE - 1, MAX(last, end));
 }
 
 static void move_chars(bool forward, int diff) {
@@ -415,8 +414,6 @@ static void xsel(char* opts, bool copy)
 	pclose(pipe);
 }
 
-#define mod_code(s) (!!((s) & ShiftMask) | !!((s) & Mod1Mask) << 1 | !!((s) & ControlMask) << 2)
-
 static void mousereport(XButtonEvent *e)
 {
 	static Point prev;
@@ -431,76 +428,58 @@ static void mousereport(XButtonEvent *e)
 
 	prev = pos;
 
-	int button = e->type == ButtonRelease ? 3 : e->button - Button1;
-	button += mod_code(e->state) << 2;
-
+	int button = e->type == ButtonRelease ? 3 : e->button + (e->button >= Button4 ? 60 : -1);
 	dprintf(pty.fd, "\033[M%c%c%c", 32 + button, 33 + pos.x, 33 + pos.y);
 }
 
-static char* format(char *c, int state)
+static void special_key(u8 c, int state)
 {
-	static char buf[8];
 	if (state)
-		sprintf(buf, "\033[%c;%d%s", c[1] ? *c++ : '1', state + 1, c);
+		dprintf(pty.fd, "\033[%d;%d%c", c < '@' ? c : 1, state + 1, c < '@' ? '~' : c);
+	else if (c < '@')
+		dprintf(pty.fd, "\033[%d~", c);
 	else
-		sprintf(buf, "\033%c%s", term.appcursor && !c[1] ? 'O' : '[', c);
-	return buf;
-}
-
-static char* kmap(KeySym keysym, int state, char* string)
-{
-	switch (keysym) {
-	case XK_Up:
-		return format("A", mod_code(state));
-	case XK_Down:
-		return format("B", mod_code(state));
-	case XK_Right:
-		return format("C", mod_code(state));
-	case XK_Left:
-		return format("D", mod_code(state));
-	case XK_End:
-		return format("F", mod_code(state));
-	case XK_Home:
-		return format("H", mod_code(state));
-	case XK_Insert:
-		return format("2~", mod_code(state));
-	case XK_Delete:
-		return format("3~", mod_code(state));
-	case XK_Prior:
-		return format("5~", mod_code(state));
-	case XK_Next:
-		return format("6~", mod_code(state));
-	case XK_ISO_Left_Tab:
-		return "\033[Z";
-	case XK_BackSpace:
-		return state & ControlMask ? "\027" : "\177";
-	default:
-		return string;
-	}
+		dprintf(pty.fd, "\033%c%c", term.appcursor ? 'O' : '[', c);
 }
 
 static void kpress(XEvent *e)
 {
+	static const u8 codes[] = {
+		'H', 'D', 'A', 'C', 'B', 5, 6, 'F', [19] = 2, [175] = 3,     // cursor keys
+		[69] = 'H', 'D', 'A', 'C', 'B', 5, 6, 'F', 'E', 2, 3,        // numpad
+		[110] = 'P', 'Q', 'R', 'S', 15, 17, 18, 19, 20, 21, 23, 24,  // function keys
+	};
+
 	XKeyEvent *ev = &e->xkey;
-	char buf[8] = { 0 };
+	char buf[8] = "";
 	KeySym keysym;
 	XLookupString(ev, buf, LEN(buf) - 1, &keysym, NULL);
 
 	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
 		selclear();
 
-	if (keysym == XK_Insert && (ev->state & ShiftMask))
+	bool shift = (ev->state & ShiftMask) != 0;
+	bool ctrl = (ev->state & ControlMask) != 0;
+	bool alt = (ev->state & Mod1Mask) != 0;
+
+	if (shift && keysym == XK_Insert)
 		xsel("xsel -po", false);
-	else if (keysym == XK_Prior && (ev->state & ShiftMask))
+	else if (shift && keysym == XK_Prior)
 		scroll(4 - pty.rows);
-	else if (keysym == XK_Next && (ev->state & ShiftMask))
+	else if (shift && keysym == XK_Next)
 		scroll(pty.rows - 4);
-	else if (keysym == XK_C && !((ControlMask | ShiftMask) & ~ev->state))
+	else if (ctrl && shift && keysym == XK_C)
 		xsel("xsel -bi", true);
-	else if (keysym == XK_V && !((ControlMask | ShiftMask) & ~ev->state))
+	else if (ctrl && shift && keysym == XK_V)
 		xsel("xsel -bo", false);
-	else
-		dprintf(pty.fd, "%s", kmap(keysym, ev->state, buf));
+	else if (keysym == XK_ISO_Left_Tab)
+		dprintf(pty.fd, "%s", "\033[Z");
+	else if (keysym == XK_BackSpace)
+		dprintf(pty.fd, "%c", ctrl ? 027 : 0177);
+	else if (BETWEEN(keysym, 0xff50, 0xffff) && codes[keysym - 0xff50])
+		special_key(codes[keysym - 0xff50], 4 * ctrl + 2 * alt + shift);
+	else if (*buf)
+		dprintf(pty.fd, "%s%s", alt ? "\033" : "", buf);
 }
 
 static void resize(XEvent *e)
@@ -546,7 +525,7 @@ static void visibility(XEvent *e)
 static void focus(XEvent *ev)
 {
 	xw.focused = ev->type == FocusIn;
-	if (term.focus)
+	if (term.report_focus)
 		dprintf(pty.fd, "\033[%c", xw.focused ? 'I' : 'O');
 }
 
@@ -684,6 +663,7 @@ static void set_mode(bool set, int mode)
 	switch (mode) {
 	case 1:    // Application cursor keys
 		term.appcursor = set;
+		break;
 	case 25:   // Show cursor
 		term.hide = !set;
 		break;
@@ -702,7 +682,7 @@ static void set_mode(bool set, int mode)
 		term.report_motion = mode == 1003 && set;
 		break;
 	case 1004: // Report focus events
-		term.focus = set;
+		term.report_focus = set;
 		break;
 	}
 }
