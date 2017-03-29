@@ -969,13 +969,13 @@ static u16 default_color(u16 i, int rgb)
 
 	// 16 ... 231: 6x6x6 color cube
 	i = (i - 16) / (u16[]) { 1, 6, 36 } [rgb] % 6;
-	return 17 * (u16[]) { 0, 6, 8, 11, 13, 15 } [i];
+	return i ? 55 + 40 * i : 0;
 }
 
 static void load_colors() {
 	Colormap colormap = DefaultColormap(xw.dpy, DefaultScreen(xw.dpy));
-	char color_name[9] = "color";
-	char def[8] = "";
+	char color_name[16] = "color";
+	char def[16] = "";
 
 	for (u16 i = 0; i < 256; ++i) {
 		sprintf(color_name + 5, "%d", i);
