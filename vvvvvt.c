@@ -38,12 +38,12 @@
 #define SLINE(y)            (term.hist[(y) % HIST_SIZE])
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
-
-#define IS_DELIM(c)         (strchr(" <>()[]{}'`\"", *(c)))
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
-#define AFTER(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x >= (b).x))
 
-#define Glyph Glyph_
+#define clear_selection()   (sel.ne.y = -1)
+#define IS_DELIM(c)         (strchr(" <>()[]{}'`\"", *(c)))
+#define POINT_EQ(a, b)      ((a).x == (b).x && (a).y == (b).y)
+#define POINT_GT(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 
 typedef enum { false, true } bool;
 typedef uint8_t u8;
@@ -51,7 +51,7 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-enum { SNAP_NONE, SNAP_WORD, SNAP_LINE };
+enum { SNAP_WORD = 2, SNAP_LINE = 3 };
 
 enum {
 	ATTR_BOLD       = 1 << 0,
@@ -70,10 +70,10 @@ typedef struct {
 	u16 mode;  // bitmask of ATTR_* flags
 	u8 fg;     // foreground color
 	u8 bg;     // background color
-} Glyph;
+} Rune;
 
 typedef struct {
-	Glyph attr; // current char attributes
+	Rune attr; // current char attributes
 	int x;
 	int y;
 } TCursor;
@@ -102,7 +102,7 @@ static struct {
 
 // Terminal state
 static struct {
-	Glyph hist[HIST_SIZE][LINE_SIZE];     // history ring buffer
+	Rune hist[HIST_SIZE][LINE_SIZE];     // history ring buffer
 	int scroll;                           // hist index of the scroll position
 	int lines;                            // hist index of the last line
 	TCursor c;                            // cursor
@@ -133,17 +133,15 @@ static struct {
 
 static XftColor colors[256];
 
-#define selclear() (sel.ne.y = -1)
-
 static void clear_region(int x1, int y1, int x2, int y2)
 {
 	if (sel.nb.y <= y2 && sel.ne.y >= y1)
-		selclear();
+		clear_selection();
 
 	for (int y = y1; y <= y2; y++) {
 		int xstart = y == y1 ? x1 : 0;
 		int xend = y == y2 ? x2 : pty.cols - 1;
-		memset(TLINE(y) + xstart, 0, (xend - xstart + 1) * sizeof(Glyph));
+		memset(TLINE(y) + xstart, 0, (xend - xstart + 1) * sizeof(Rune));
 	}
 }
 
@@ -162,8 +160,8 @@ static void move_chars(bool forward, int diff) {
 	int src = term.c.x + (forward ? 0 : diff);
 	int size = pty.cols - (term.c.x + diff);
 	int del = (forward ? term.c.x : pty.cols - diff);
-	Glyph *line = TLINE(term.c.y);
-	memmove(line + dst, line + src, size * sizeof(Glyph));
+	Rune *line = TLINE(term.c.y);
+	memmove(line + dst, line + src, size * sizeof(Rune));
 	clear_region(del, term.c.y, del + diff - 1, term.c.y);
 }
 
@@ -175,7 +173,7 @@ static void move_to(int x, int y)
 
 static void swap_screen(void)
 {
-	selclear();
+	clear_selection();
 	term.saved_c[term.alt] = term.c;
 	term.alt = !term.alt;
 	term.c = term.saved_c[term.alt];
@@ -211,13 +209,46 @@ static Point pixel2cell(int px, int py)
 	return (Point) { x, y };
 }
 
+// Write every set and selected byte to the pipe
+static void getsel(FILE* pipe)
+{
+	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
+		Rune *line = SLINE(y);
+		int x1 = y == sel.nb.y ? sel.nb.x : 0;
+		int x2 = y == sel.ne.y ? sel.ne.x : pty.cols;
+
+		for (int x = x1; x < x2; ++x)
+			fprintf(pipe, "%.4s", line[x].u);
+		if (x2 == pty.cols)
+			fprintf(pipe, "\n");
+	}
+}
+
+static void xsel(char* opts, bool copy)
+{
+	if (copy && !POINT_GT(sel.ne, sel.nb))
+		return;
+
+	FILE* pipe = popen(opts, copy ? "w" : "r");
+
+	if (copy) {
+		getsel(pipe);
+	} else {
+		char sel_buf[BUFSIZ] = "";
+		fread(sel_buf, 1, BUFSIZ, pipe);
+		dprintf(pty.fd, "%s", sel_buf);
+	}
+
+	pclose(pipe);
+}
+
 static void selnormalize(Point oe)
 {
-	bool swapped = AFTER(sel.ob, oe);
-
+	bool swapped = POINT_GT(sel.ob, oe);
 	sel.nb = swapped ? oe : sel.ob;
 	sel.ne = swapped ? sel.ob : oe;
-	if (sel.snap >= SNAP_LINE) {
+
+	if (sel.snap == SNAP_LINE) {
 		sel.nb.x = 0;
 		sel.ne.x = pty.cols;
 	} else if (sel.snap == SNAP_WORD) {
@@ -288,75 +319,75 @@ static void create_window(void)
 	XDefineCursor(xw.dpy, xw.win, XCreateFontCursor(xw.dpy, XC_xterm));
 }
 
-static void draw_text(Glyph glyph, u8 *text, int len, int x, int y)
+static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 {
-	bool bold = (glyph.mode & ATTR_BOLD) != 0;
-	bool italic = (glyph.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
+	bool bold = (rune.mode & ATTR_BOLD) != 0;
+	bool italic = (rune.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = xw.font[bold + 2 * italic];
-	XftColor fg = colors[glyph.fg ? glyph.fg : DEFAULTFG];
-	XftColor bg = colors[glyph.bg];
+	XftColor fg = colors[rune.fg ? rune.fg : DEFAULTFG];
+	XftColor bg = colors[rune.bg];
 	int baseline = y + font->ascent;
 	int width = len * xw.font_width;
 
-	if (glyph.mode & ATTR_INVISIBLE) {
+	if (rune.mode & ATTR_INVISIBLE) {
 		fg = bg;
-	} else if (glyph.mode & ATTR_FAINT) {
+	} else if (rune.mode & ATTR_FAINT) {
 		fg.color.red /= 2;
 		fg.color.green /= 2;
 		fg.color.blue /= 2;
 	}
 
-	if (glyph.mode & ATTR_REVERSE)
+	if (rune.mode & ATTR_REVERSE)
 		SWAP(fg, bg);
 
 	// Draw the background, then the text, then decorations
 	XftDrawRect(xw.draw, &bg, x, y, width, xw.font_height);
 	XftDrawStringUtf8(xw.draw, &fg, font, x, baseline, text, len);
 
-	if (glyph.mode & ATTR_UNDERLINE)
+	if (rune.mode & ATTR_UNDERLINE)
 		XftDrawRect(xw.draw, &fg, x, baseline + 1, width, 1);
 
-	if (glyph.mode & ATTR_STRUCK)
+	if (rune.mode & ATTR_STRUCK)
 		XftDrawRect(xw.draw, &fg, x, (2 * baseline + y) / 3, width, 1);
 
-	if (glyph.mode & ATTR_BAR)
+	if (rune.mode & ATTR_BAR)
 		XftDrawRect(xw.draw, &fg, x, y, 2, xw.font_height);
 }
 
-// Draws the glyph at the given terminal coordinates.
-static void draw_glyph(int x, int y)
+// Draws the rune at the given terminal coordinates.
+static void draw_rune(int x, int y)
 {
 	static u8 buf[4 * LINE_SIZE];
 	static int len;
-	static Glyph prev;
+	static Rune prev;
 	static int draw_x, draw_y;
 
-	Glyph glyph = TLINE(y)[x];
+	Rune rune = TLINE(y)[x];
 
 	// Handle selection and cursor
 	if (selected(x, y + term.scroll))
-		glyph.mode ^= ATTR_REVERSE;
+		rune.mode ^= ATTR_REVERSE;
 
 	int cursor = term.hide || term.scroll != term.lines ? 0 :
 		xw.focused && term.cursor_style < 3 ? ATTR_REVERSE :
 		term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 
 	if (x == term.c.x && y == term.c.y)
-		glyph.mode ^= cursor;
+		rune.mode ^= cursor;
 
-	bool diff = glyph.fg != prev.fg || glyph.bg != prev.bg || glyph.mode != prev.mode;
+	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.mode != prev.mode;
 
 	if (x == 0 || diff) {
 		draw_text(prev, buf, len, draw_x, draw_y);
 		len = 0;
 		draw_x = xw.border + x * xw.font_width;
 		draw_y = xw.border + y * xw.font_height;
-		prev = glyph;
+		prev = rune;
 	}
 
-	int utf_len = UTF_LEN(*glyph.u);
-	if (glyph.u[utf_len - 1]) {
-		memcpy(buf + len, glyph.u, utf_len);
+	int utf_len = UTF_LEN(*rune.u);
+	if (rune.u[utf_len - 1]) {
+		memcpy(buf + len, rune.u, utf_len);
 		len += utf_len;
 	} else if (utf_len == 1) {
 		buf[len++] = ' ';
@@ -366,67 +397,17 @@ static void draw_glyph(int x, int y)
 	}
 }
 
-// Redraws all glyphs on our buffer, then flushes it to the window.
+// Redraws all runes on our buffer, then flushes it to the window.
 static void draw(void)
 {
 	XftDrawRect(xw.draw, colors, 0, 0, xw.width, xw.height);
 
 	for (int y = 0; y < pty.rows; ++y)
 		for (int x = 0; x < pty.cols; ++x)
-			draw_glyph(x, y);
-	draw_glyph(0, 0);
+			draw_rune(x, y);
+	draw_rune(0, 0);
 
 	XCopyArea(xw.dpy, xw.pixmap, xw.win, xw.gc, 0, 0, xw.width, xw.height, 0, 0);
-}
-
-// Write every set and selected byte to the pipe
-static void getsel(FILE* pipe)
-{
-	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
-		Glyph *line = SLINE(y);
-		int x1 = y == sel.nb.y ? sel.nb.x : 0;
-		int x2 = y == sel.ne.y ? sel.ne.x : pty.cols;
-
-		for (int x = x1; x < x2; ++x)
-			fprintf(pipe, "%.4s", line[x].u);
-		if (x2 == pty.cols)
-			fprintf(pipe, "\n");
-	}
-}
-
-static void xsel(char* opts, bool copy)
-{
-	if (copy && !AFTER(sel.ne, sel.nb))
-		return;
-
-	FILE* pipe = popen(opts, copy ? "w" : "r");
-
-	if (copy) {
-		getsel(pipe);
-	} else {
-		char sel_buf[BUFSIZ] = { 0 };
-		fread(sel_buf, 1, BUFSIZ, pipe);
-		dprintf(pty.fd, "%s", sel_buf);
-	}
-
-	pclose(pipe);
-}
-
-static void mousereport(XButtonEvent *e)
-{
-	static Point prev;
-	Point pos = pixel2cell(e->x, e->y);
-
-	if (pos.x > 255 || pos.y > 255)
-		return;
-
-	if (e->type == MotionNotify && pos.x == prev.x && pos.y == prev.y)
-		return;
-
-	prev = pos;
-
-	int button = e->type == ButtonRelease ? 3 : e->button + (e->button >= Button4 ? 60 : -1);
-	dprintf(pty.fd, "\033[M%c%c%c", 32 + button, 33 + pos.x, 33 + pos.y);
 }
 
 static void special_key(u8 c, int state)
@@ -451,8 +432,8 @@ static void on_keypress(XKeyEvent *e)
 	KeySym keysym;
 	XLookupString(e, buf, LEN(buf) - 1, &keysym, NULL);
 
-	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
-		selclear();
+	if (selected(term.c.x, term.c.y + term.scroll))
+		clear_selection();
 
 	bool shift = (e->state & ShiftMask) != 0;
 	bool ctrl = (e->state & ControlMask) != 0;
@@ -509,43 +490,54 @@ static void on_resize(XConfigureEvent *e)
 		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
 }
 
-#define Release 64
-#define POINT_EQ(a, b) ((a).x == (b).x && (a).y == (b).y)
-
-static void on_click(XButtonEvent *e)
+static void on_mouse(XButtonEvent *e)
 {
-	Point point = pixel2cell(e->x, e->y);
-	point.y += term.scroll;
+	static Point prev;
+	int button = e->type == ButtonRelease ? 4 : e->button + (e->button >= Button4 ? 61 : 0);
+	Point pos = pixel2cell(e->x, e->y);
+	pos.y += term.scroll;
 
-	switch (e->button | (e->type == ButtonRelease ? Release : 0)) {
-	case Button1:
-		sel.snap = POINT_EQ(point, sel.ob) ? sel.snap + 1 : SNAP_NONE;
-		sel.ob = point;
-		selnormalize(point);
+	if (!button && POINT_EQ(pos, prev))
+		return;
+	prev = pos;
+
+	if (term.report_buttons && (button || term.report_motion) && e->state != ShiftMask) {
+		if (pos.x <= 222 && pos.y <= 222)
+			dprintf(pty.fd, "\033[M%c%c%c", 31 + button, 33 + pos.x, 33 + pos.y);
+		return;
+	}
+
+	switch (button) {
+	case 0:  // Cursor movement
+		if (e->state & (Button1Mask | Button3Mask))
+			selnormalize(pos);
 		break;
-	case Button3:
-		sel.snap = SNAP_LINE;
-		selnormalize(point);
+	case 1:  // Left click
+		sel.snap = POINT_EQ(pos, sel.ob) * sel.snap + 1 & 3;
+		sel.ob = pos;
+		selnormalize(pos);
 		break;
-	case Button4:
-		scroll(-5);
-		break;
-	case Button5:
-		scroll(5);
-		break;
-	case Button2 | Release:
+	case 2:  // Middle click
 		xsel("xsel -po", false);
 		break;
-	case Button1 | Release:
-	case Button3 | Release:
+	case 3:  // Right click
+		sel.snap = SNAP_LINE;
+		selnormalize(pos);
+		break;
+	case 4:  // Any button released
 		xsel("xsel -pi", true);
+		break;
+	case 65: // Scroll wheel up
+		scroll(-5);
+		break;
+	case 66: // Scroll wheel down
+		scroll(5);
 		break;
 	}
 }
 
-static void handle_xevent(XEvent * e) {
-	XButtonEvent* button = (XButtonEvent*) e;
-
+static void handle_xevent(XEvent * e)
+{
 	switch (e->type) {
 	case KeyPress:
 		on_keypress((XKeyEvent*) e);
@@ -562,18 +554,10 @@ static void handle_xevent(XEvent * e) {
 		if (term.report_focus)
 			dprintf(pty.fd, "\033[%c", xw.focused ? 'I' : 'O');
 		break;
-	case MotionNotify:
-		if (term.report_motion && !(button->state & ShiftMask))
-			mousereport(button);
-		else if (button->state & (Button1Mask | Button3Mask))
-			selnormalize(pixel2cell(button->x, button->y + term.scroll));
-		break;
 	case ButtonPress:
 	case ButtonRelease:
-		if (term.report_buttons && !(button->state & ShiftMask))
-			mousereport(button);
-		else
-			on_click(button);
+	case MotionNotify:
+		on_mouse((XButtonEvent*) e);
 		break;
 	}
 }
@@ -846,7 +830,7 @@ static void tputc(u8 u)
 	static const char* line_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
 	static long i;
 	static long utf_len;
-	static Glyph *glyph;
+	static Rune *rune;
 
 	switch (u) {
 	case '\b':
@@ -870,7 +854,7 @@ static void tputc(u8 u)
 		return;
 	case 128 ... 191:
 		if (i < utf_len) {
-			glyph->u[i++] = u;
+			rune->u[i++] = u;
 			return;
 		}
 		// FALLTHROUGH
@@ -881,14 +865,14 @@ static void tputc(u8 u)
 			term.c.x = 0;
 		}
 
-		glyph = &TLINE(term.c.y)[term.c.x];
-		*glyph = term.c.attr;
-		glyph->u[0] = u;
+		rune = &TLINE(term.c.y)[term.c.x];
+		*rune = term.c.attr;
+		rune->u[0] = u;
 		utf_len = UTF_LEN(u);
 		i = 1;
 
 		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
-			memcpy(glyph->u, line_drawing + (u - 'j') * 3, 3);
+			memcpy(rune->u, line_drawing + (u - 'j') * 3, 3);
 
 		++term.c.x;
 	}

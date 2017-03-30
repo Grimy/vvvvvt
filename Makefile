@@ -2,6 +2,7 @@ CC = clang
 CFLAGS += -std=c99 -D_POSIX_C_SOURCE=200809 -Weverything -Werror
 CFLAGS += -Wno-sign-conversion -Wno-switch -Wno-gnu-case-range
 CFLAGS += -g -O3 -fno-inline -fno-omit-frame-pointer -fsanitize=address,undefined
+# CFLAGS += -O3 -fno-inline
 CFLAGS += -lutil -lX11 -lXft `pkg-config --cflags --libs fontconfig`
 
 vvvvvt: vvvvvt.c Makefile
