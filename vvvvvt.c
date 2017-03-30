@@ -85,10 +85,9 @@ typedef struct {
 
 static struct {
 	int snap; // snapping mode
-	Point ob; // original coordinates of the beginning of the selection
-	Point oe; // original coordinates of the end of the selection
-	Point nb; // normalized coordinates of the beginning of the selection
-	Point ne; // normalized coordinates of the end of the selection
+	Point ob; // coordinates of the point clicked to start the selection
+	Point nb; // coordinates of the beginning of the selection (inclusive)
+	Point ne; // coordinates of the end of the selection (exclusive)
 } sel;
 
 static struct {
@@ -209,21 +208,22 @@ static Point pixel2cell(int px, int py)
 {
 	int x = (px - xw.border) / xw.font_width;
 	int y = (py - xw.border) / xw.font_height;
-	return (Point) { x, y + term.scroll };
+	return (Point) { x, y };
 }
 
-static void selnormalize(void)
+static void selnormalize(Point oe)
 {
-	bool swapped = AFTER(sel.ob, sel.oe);
-	sel.nb = swapped ? sel.oe : sel.ob;
-	sel.ne = swapped ? sel.ob : sel.oe;
+	bool swapped = AFTER(sel.ob, oe);
+
+	sel.nb = swapped ? oe : sel.ob;
+	sel.ne = swapped ? sel.ob : oe;
 	if (sel.snap >= SNAP_LINE) {
 		sel.nb.x = 0;
-		sel.ne.x = pty.cols - 1;
+		sel.ne.x = pty.cols;
 	} else if (sel.snap == SNAP_WORD) {
 		while (sel.nb.x > 0 && !IS_DELIM(SLINE(sel.nb.y)[sel.nb.x - 1].u))
 			--sel.nb.x;
-		while (!IS_DELIM(SLINE(sel.ne.y)[sel.ne.x + 1].u))
+		while (!IS_DELIM(SLINE(sel.ne.y)[sel.ne.x].u))
 			++sel.ne.x;
 	}
 }
@@ -232,7 +232,7 @@ static bool selected(int x, int y)
 {
 	return BETWEEN(y, sel.nb.y, sel.ne.y)
 		&& (y != sel.nb.y || x >= sel.nb.x)
-		&& (y != sel.ne.y || x <= sel.ne.x);
+		&& (y != sel.ne.y || x <  sel.ne.x);
 }
 
 static int __attribute__((noreturn)) clean_exit(Display *dpy)
@@ -385,12 +385,11 @@ static void getsel(FILE* pipe)
 	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
 		Glyph *line = SLINE(y);
 		int x1 = y == sel.nb.y ? sel.nb.x : 0;
-		int x2 = y == sel.ne.y ? sel.ne.x : pty.cols - 1;
-		int x;
+		int x2 = y == sel.ne.y ? sel.ne.x : pty.cols;
 
-		for (x = x1; x <= x2 && *line[x].u; ++x)
+		for (int x = x1; x < x2; ++x)
 			fprintf(pipe, "%.4s", line[x].u);
-		if (x <= x2)
+		if (x2 == pty.cols)
 			fprintf(pipe, "\n");
 	}
 }
@@ -417,7 +416,6 @@ static void mousereport(XButtonEvent *e)
 {
 	static Point prev;
 	Point pos = pixel2cell(e->x, e->y);
-	pos.y -= term.scroll;
 
 	if (pos.x > 255 || pos.y > 255)
 		return;
@@ -441,7 +439,7 @@ static void special_key(u8 c, int state)
 		dprintf(pty.fd, "\033%c%c", term.appcursor ? 'O' : '[', c);
 }
 
-static void kpress(XEvent *e)
+static void on_keypress(XKeyEvent *e)
 {
 	static const u8 codes[] = {
 		'H', 'D', 'A', 'C', 'B', 5, 6, 'F', [19] = 2, [175] = 3,     // cursor keys
@@ -449,17 +447,16 @@ static void kpress(XEvent *e)
 		[110] = 'P', 'Q', 'R', 'S', 15, 17, 18, 19, 20, 21, 23, 24,  // function keys
 	};
 
-	XKeyEvent *ev = &e->xkey;
 	char buf[8] = "";
 	KeySym keysym;
-	XLookupString(ev, buf, LEN(buf) - 1, &keysym, NULL);
+	XLookupString(e, buf, LEN(buf) - 1, &keysym, NULL);
 
 	if (BETWEEN(term.c.y + term.scroll, sel.nb.y, sel.ne.y))
 		selclear();
 
-	bool shift = (ev->state & ShiftMask) != 0;
-	bool ctrl = (ev->state & ControlMask) != 0;
-	bool alt = (ev->state & Mod1Mask) != 0;
+	bool shift = (e->state & ShiftMask) != 0;
+	bool ctrl = (e->state & ControlMask) != 0;
+	bool alt = (e->state & Mod1Mask) != 0;
 
 	if (shift && keysym == XK_Insert)
 		xsel("xsel -po", false);
@@ -481,16 +478,13 @@ static void kpress(XEvent *e)
 		dprintf(pty.fd, "%s%s", alt ? "\033" : "", buf);
 }
 
-static void resize(XEvent *e)
+static void on_resize(XConfigureEvent *e)
 {
-	XConfigureEvent *ev = &e->xconfigure;
-
-	if (ev->width == xw.width && ev->height == xw.height)
+	if (e->width == xw.width && e->height == xw.height)
 		return;
 
 	// Update terminal info
-	Point pty_size = pixel2cell(ev->width, ev->height);
-	pty_size.y -= term.scroll;
+	Point pty_size = pixel2cell(e->width, e->height);
 	pty.cols = MIN((u16) pty_size.x, LINE_SIZE - 1);
 	pty.rows = MIN((u16) pty_size.y, HIST_SIZE);
 	term.top = 0;
@@ -504,8 +498,8 @@ static void resize(XEvent *e)
 		XftDrawDestroy(xw.draw);
 
 	Visual *visual = DefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
-	xw.width = ev->width;
-	xw.height = ev->height;
+	xw.width = e->width;
+	xw.height = e->height;
 	xw.pixmap = XCreatePixmap(xw.dpy, xw.win, xw.width, xw.height, 24);
 	xw.draw = XftDrawCreate(xw.dpy, xw.pixmap, visual, CopyFromParent);
 
@@ -515,54 +509,23 @@ static void resize(XEvent *e)
 		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
 }
 
-static void visibility(XEvent *e)
+#define Release 64
+#define POINT_EQ(a, b) ((a).x == (b).x && (a).y == (b).y)
+
+static void on_click(XButtonEvent *e)
 {
-	XVisibilityEvent *ev = &e->xvisibility;
-	xw.visible = ev->state != VisibilityFullyObscured;
-}
+	Point point = pixel2cell(e->x, e->y);
+	point.y += term.scroll;
 
-static void focus(XEvent *ev)
-{
-	xw.focused = ev->type == FocusIn;
-	if (term.report_focus)
-		dprintf(pty.fd, "\033[%c", xw.focused ? 'I' : 'O');
-}
-
-static void bmotion(XEvent *e)
-{
-	XButtonEvent *ev = &e->xbutton;
-
-	if (term.report_motion && !(ev->state & ShiftMask)) {
-		mousereport(ev);
-	} else if (ev->state & (Button1Mask | Button3Mask)) {
-		sel.oe = pixel2cell(ev->x, ev->y);
-		selnormalize();
-	}
-}
-
-static void bpress(XEvent *e)
-{
-	XButtonEvent *ev = &e->xbutton;
-	Point point = pixel2cell(ev->x, ev->y);
-
-	if (term.report_buttons && !(ev->state & ShiftMask))
-		mousereport(ev);
-
-	switch (ev->button) {
+	switch (e->button | (e->type == ButtonRelease ? Release : 0)) {
 	case Button1:
-		if (sel.ob.x == point.x && sel.ob.y == point.y) {
-			++sel.snap;
-			selnormalize();
-		} else {
-			selclear();
-			sel.ob = sel.oe = point;
-			sel.snap = SNAP_NONE;
-		}
+		sel.snap = POINT_EQ(point, sel.ob) ? sel.snap + 1 : SNAP_NONE;
+		sel.ob = point;
+		selnormalize(point);
 		break;
 	case Button3:
 		sel.snap = SNAP_LINE;
-		sel.oe = point;
-		selnormalize();
+		selnormalize(point);
 		break;
 	case Button4:
 		scroll(-5);
@@ -570,31 +533,50 @@ static void bpress(XEvent *e)
 	case Button5:
 		scroll(5);
 		break;
+	case Button2 | Release:
+		xsel("xsel -po", false);
+		break;
+	case Button1 | Release:
+	case Button3 | Release:
+		xsel("xsel -pi", true);
+		break;
 	}
 }
 
-static void brelease(XEvent *e)
-{
-	XButtonEvent *ev = &e->xbutton;
+static void handle_xevent(XEvent * e) {
+	XButtonEvent* button = (XButtonEvent*) e;
 
-	if (term.report_buttons && !(ev->state & ShiftMask))
-		mousereport(ev);
-	else if (ev->button == Button2)
-		xsel("xsel -po", false);
-	else if (ev->button == Button1 || ev->button == Button3)
-		xsel("xsel -pi", true);
+	switch (e->type) {
+	case KeyPress:
+		on_keypress((XKeyEvent*) e);
+		break;
+	case ConfigureNotify:
+		on_resize((XConfigureEvent*) e);
+		break;
+	case VisibilityNotify:
+		xw.visible = ((XVisibilityEvent*) e)->state != VisibilityFullyObscured;
+		break;
+	case FocusIn:
+	case FocusOut:
+		xw.focused = e->type == FocusIn;
+		if (term.report_focus)
+			dprintf(pty.fd, "\033[%c", xw.focused ? 'I' : 'O');
+		break;
+	case MotionNotify:
+		if (term.report_motion && !(button->state & ShiftMask))
+			mousereport(button);
+		else if (button->state & (Button1Mask | Button3Mask))
+			selnormalize(pixel2cell(button->x, button->y + term.scroll));
+		break;
+	case ButtonPress:
+	case ButtonRelease:
+		if (term.report_buttons && !(button->state & ShiftMask))
+			mousereport(button);
+		else
+			on_click(button);
+		break;
+	}
 }
-
-static void (*handler[LASTEvent])(XEvent *) = {
-	[KeyPress] = kpress,
-	[ConfigureNotify] = resize,
-	[VisibilityNotify] = visibility,
-	[FocusIn] = focus,
-	[FocusOut] = focus,
-	[MotionNotify] = bmotion,
-	[ButtonPress] = bpress,
-	[ButtonRelease] = brelease,
-};
 
 static char pty_getchar(void)
 {
@@ -938,11 +920,10 @@ static void __attribute__((noreturn)) run(void)
 				tputc(*pty.c++);
 		}
 
-		XEvent ev;
+		XEvent e;
 		while (XPending(xw.dpy)) {
-			XNextEvent(xw.dpy, &ev);
-			if (handler[ev.type])
-				(handler[ev.type])(&ev);
+			XNextEvent(xw.dpy, &e);
+			handle_xevent(&e);
 		}
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
