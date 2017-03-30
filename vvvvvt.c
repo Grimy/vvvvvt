@@ -385,12 +385,12 @@ static void draw_rune(int x, int y)
 		prev = rune;
 	}
 
-	int utf_len = UTF_LEN(*rune.u);
-	if (rune.u[utf_len - 1]) {
+	u32 utf_len = UTF_LEN(*rune.u);
+	if (*rune.u < 0x80) {
+		buf[len++] = MAX(*rune.u, ' ');
+	} else if (BETWEEN(*rune.u, 0xC0, 0xF7) && strnlen((char*) rune.u, 4) == utf_len) {
 		memcpy(buf + len, rune.u, utf_len);
 		len += utf_len;
-	} else if (utf_len == 1) {
-		buf[len++] = ' ';
 	} else {
 		memcpy(buf + len, "⁇", 3);
 		len += 3;
