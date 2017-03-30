@@ -486,7 +486,7 @@ static void on_resize(XConfigureEvent *e)
 	// Update terminal info
 	Point pty_size = pixel2cell(e->width, e->height);
 	pty.cols = MIN((u16) pty_size.x, LINE_SIZE - 1);
-	pty.rows = MIN((u16) pty_size.y, HIST_SIZE);
+	pty.rows = MIN((u16) pty_size.y, HIST_SIZE / 2);
 	term.top = 0;
 	term.bot = pty.rows - 1;
 	move_to(term.c.x, term.c.y);
