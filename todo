@@ -1,6 +1,5 @@
 * Black screen after re-focusing?
 * set TERM
-* Replace \n with \r on paste
 * handle reverseVideo
 * handle metaSendsEscape
 * handle backarrowKey

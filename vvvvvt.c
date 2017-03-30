@@ -37,13 +37,13 @@
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define SLINE(y)            (term.hist[(y) % HIST_SIZE])
 #define TLINE(y)            (SLINE((y) + term.scroll))
-#define die(...)            do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
+#define die(message)        exit(fprintf(stderr, message ": %s\n", errno ? strerror(errno) : ""))
 #define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 
 #define clear_selection()   (sel.ne.y = -1)
 #define IS_DELIM(c)         (strchr(" <>()[]{}'`\"", *(c)))
 #define POINT_EQ(a, b)      ((a).x == (b).x && (a).y == (b).y)
-#define POINT_GT(a, b)         ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
+#define POINT_GT(a, b)      ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 
 typedef enum { false, true } bool;
 typedef uint8_t u8;
@@ -103,12 +103,12 @@ static struct {
 // Terminal state
 static struct {
 	Rune hist[HIST_SIZE][LINE_SIZE];     // history ring buffer
-	int scroll;                           // hist index of the scroll position
-	int lines;                            // hist index of the last line
-	TCursor c;                            // cursor
-	TCursor saved_c[2];                   // saved cursors
-	int top;                              // top scroll limit
-	int bot;                              // bottom scroll limit
+	int scroll;                          // hist index of the scroll position
+	int lines;                           // hist index of the last line
+	TCursor c;                           // cursor
+	TCursor saved_c[2];                  // saved cursors
+	int top;                             // top scroll limit
+	int bot;                             // bottom scroll limit
 	int cursor_style;
 	u8 charset[4];
 	bool report_buttons, report_motion, report_focus;
@@ -209,9 +209,14 @@ static Point pixel2cell(int px, int py)
 	return (Point) { x, y };
 }
 
-// Write every set and selected byte to the pipe
-static void getsel(FILE* pipe)
+static void copy(bool clipboard)
 {
+	// If the selection is empty, leave the clipboard as-is rather than emptying it
+	if (!POINT_GT(sel.ne, sel.nb))
+		return;
+
+	FILE* pipe = popen(clipboard ? "xsel -bi" : "xsel -i", "w");
+
 	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
 		Rune *line = SLINE(y);
 		int x1 = y == sel.nb.y ? sel.nb.x : 0;
@@ -222,22 +227,18 @@ static void getsel(FILE* pipe)
 		if (x2 == pty.cols)
 			fprintf(pipe, "\n");
 	}
+
+	pclose(pipe);
 }
 
-static void xsel(char* opts, bool copy)
+static void paste(bool clipboard)
 {
-	if (copy && !POINT_GT(sel.ne, sel.nb))
-		return;
+	FILE* pipe = popen(clipboard ? "xsel -bo" : "xsel -o", "r");
 
-	FILE* pipe = popen(opts, copy ? "w" : "r");
-
-	if (copy) {
-		getsel(pipe);
-	} else {
-		char sel_buf[BUFSIZ] = "";
-		fread(sel_buf, 1, BUFSIZ, pipe);
-		dprintf(pty.fd, "%s", sel_buf);
-	}
+	char sel_buf[BUFSIZ] = "";
+	fread(sel_buf, 1, BUFSIZ, pipe);
+	for (char *p = sel_buf; (p = strchr(p, '\n')); *p++ = '\r');
+	dprintf(pty.fd, "%s", sel_buf);
 
 	pclose(pipe);
 }
@@ -274,7 +275,7 @@ static int __attribute__((noreturn)) clean_exit(Display *dpy)
 	exit(0);
 }
 
-static char* get_resource(char* resource, char* fallback)
+static const char* get_resource(const char* resource, const char* fallback)
 {
 	char* result = XGetDefault(xw.dpy, "vvvvvt", resource);
 	return result ? result : fallback;
@@ -283,15 +284,14 @@ static char* get_resource(char* resource, char* fallback)
 static void create_window(void)
 {
 	if (!(xw.dpy = XOpenDisplay(0)))
-		die("Failed to open display\n");
+		die("Failed to open display");
 
 	// Load fonts
-	char *face_name = get_resource("faceName", "mono");
+	const char *face_name = get_resource("faceName", "mono");
+	const char *style[] = { "", "bold", "italic", "bold italic" };
 	char font_name[128];
-	char *style[] = { "", ":style=bold", ":style=italic", ":style=bold italic" };
 	for (int i = 0; i < 4; ++i) {
-		strcpy(font_name, face_name);
-		strcat(font_name, style[i]);
+		sprintf(font_name, "%s:style=%s", face_name, style[i]);
 		xw.font[i] = XftFontOpenName(xw.dpy, DefaultScreen(xw.dpy), font_name);
 	}
 
@@ -440,15 +440,15 @@ static void on_keypress(XKeyEvent *e)
 	bool alt = (e->state & Mod1Mask) != 0;
 
 	if (shift && keysym == XK_Insert)
-		xsel("xsel -po", false);
+		paste(false);
 	else if (shift && keysym == XK_Prior)
 		scroll(4 - pty.rows);
 	else if (shift && keysym == XK_Next)
 		scroll(pty.rows - 4);
 	else if (ctrl && shift && keysym == XK_C)
-		xsel("xsel -bi", true);
+		copy(true);
 	else if (ctrl && shift && keysym == XK_V)
-		xsel("xsel -bo", false);
+		paste(true);
 	else if (keysym == XK_ISO_Left_Tab)
 		dprintf(pty.fd, "%s", "\033[Z");
 	else if (keysym == XK_BackSpace)
@@ -518,14 +518,14 @@ static void on_mouse(XButtonEvent *e)
 		selnormalize(pos);
 		break;
 	case 2:  // Middle click
-		xsel("xsel -po", false);
+		paste(false);
 		break;
 	case 3:  // Right click
 		sel.snap = SNAP_LINE;
 		selnormalize(pos);
 		break;
 	case 4:  // Any button released
-		xsel("xsel -pi", true);
+		copy(false);
 		break;
 	case 65: // Scroll wheel up
 		scroll(-5);
@@ -579,10 +579,10 @@ static void pty_new(char* cmd[])
 {
 	switch (forkpty(&pty.fd, 0, 0, 0)) {
 	case -1:
-		die("forkpty failed\n");
+		die("forkpty failed");
 	case 0:
 		execvp(cmd[0], cmd);
-		die("exec failed: %s\n", strerror(errno));
+		die("exec failed");
 	default:
 		signal(SIGCHLD, SIG_IGN);
 	}
@@ -894,7 +894,7 @@ static void __attribute__((noreturn)) run(void)
 
 		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
 		if (result < 0)
-			die("select failed: %s\n", strerror(errno));
+			die("select failed");
 		dirty |= result > 0;
 
 		if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
