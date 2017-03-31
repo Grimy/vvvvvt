@@ -1,6 +1,5 @@
 * set TERM
-* occasionnal segfault on startup?
+* test under non-tiling WMs !!!
 * handle reverseVideo
-* handle metaSendsEscape
 * handle backarrowKey
 * handle saveLines

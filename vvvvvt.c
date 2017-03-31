@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <time.h>
@@ -110,13 +111,13 @@ static struct {
 	u8 charset[4];
 	bool report_buttons, report_motion, report_focus;
 	bool alt, hide, appcursor, line_drawing;
+	bool meta_sends_escape;
 } term;
 
 // Drawing Context
 static struct {
-	Display *dpy;
+	Display *disp;
 	XftFont *font[4];
-	GC gc;
 	XftDraw *draw;
 	char *font_name;
 	int width, height;
@@ -262,38 +263,24 @@ static bool selected(int x, int y)
 		&& (y != sel.ne.y || x <  sel.ne.x);
 }
 
-static int __attribute__((noreturn)) clean_exit(Display *dpy)
+static int __attribute__((noreturn)) clean_exit(Display *disp)
 {
 	for (int i = 0; i < 4; ++i)
-		XftFontClose(dpy, w.font[i]);
-	XCloseDisplay(dpy);
+		XftFontClose(disp, w.font[i]);
+	XCloseDisplay(disp);
 	exit(0);
 }
 
 static const char* get_resource(const char* resource, const char* fallback)
 {
-	char* result = XGetDefault(w.dpy, "vvvvvt", resource);
+	char* result = XGetDefault(w.disp, "vvvvvt", resource);
 	return result ? result : fallback;
 }
 
 static void create_window(void)
 {
-	if (!(w.dpy = XOpenDisplay(0)))
+	if (!(w.disp = XOpenDisplay(0)))
 		die("Failed to open display");
-
-	// Load fonts
-	const char *face_name = get_resource("faceName", "mono");
-	const char *style[] = { "", "bold", "italic", "bold italic" };
-	char font_name[128];
-	for (int i = 0; i < 4; ++i) {
-		sprintf(font_name, "%s:style=%s", face_name, style[i]);
-		w.font[i] = XftFontOpenName(w.dpy, DefaultScreen(w.dpy), font_name);
-	}
-
-	double scale_height = atof(get_resource("scaleHeight", "1"));
-	w.font_height = (int) ((w.font[0]->height + 1) * scale_height + .999);
-	w.font_width = w.font[0]->max_advance_width;
-	w.border = atoi(get_resource("borderWidth", "2"));
 
 	// Events
 	XSetIOErrorHandler(clean_exit);
@@ -302,18 +289,14 @@ static void create_window(void)
 	attrs.event_mask |= KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 
 	// Create and map the window
-	Window parent = XRootWindow(w.dpy, DefaultScreen(w.dpy));
-	Window win = XCreateSimpleWindow(w.dpy, parent, 0, 0, 1, 1, 0, CopyFromParent, CopyFromParent);
-	XChangeWindowAttributes(w.dpy, win, CWEventMask, &attrs);
-	XStoreName(w.dpy, win, "vvvvvt");
-	XDefineCursor(w.dpy, win, XCreateFontCursor(w.dpy, XC_xterm));
-	XMapWindow(w.dpy, win);
+	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
+	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, 1, 1, 0, CopyFromParent, CopyFromParent);
+	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), CopyFromParent);
 
-	// Graphic context
-	XGCValues gcvalues = { .graphics_exposures = False };
-	w.gc = XCreateGC(w.dpy, parent, GCGraphicsExposures, &gcvalues);
-	Visual *visual = DefaultVisual(w.dpy, DefaultScreen(w.dpy));
-	w.draw = XftDrawCreate(w.dpy, win, visual, CopyFromParent);
+	XChangeWindowAttributes(w.disp, win, CWEventMask, &attrs);
+	XStoreName(w.disp, win, "vvvvvt");
+	XDefineCursor(w.disp, win, XCreateFontCursor(w.disp, XC_xterm));
+	XMapWindow(w.disp, win);
 }
 
 static void draw_text(Rune rune, u8 *text, int len, int x, int y)
@@ -401,7 +384,7 @@ static void draw(void)
 		for (int x = 0; x < pty.cols; ++x)
 			draw_rune(x, y);
 	draw_rune(0, 0);
-	XFlush(w.dpy);
+	XFlush(w.disp);
 }
 
 static void special_key(u8 c, int state)
@@ -433,7 +416,7 @@ static void on_keypress(XKeyEvent *e)
 	if (selected(cursor.x, cursor.y + term.scroll))
 		clear_selection();
 
-	if (len && meta)
+	if (meta && term.meta_sends_escape && len)
 		dprintf(pty.fd, "%c", 033);
 
 	if (shift && keysym == XK_Insert)
@@ -557,7 +540,7 @@ static u8 pty_getchar(void)
 		pty.c = pty.buf;
 		long result = read(pty.fd, pty.buf, BUFSIZ);
 		if (result < 0)
-			clean_exit(w.dpy);
+			clean_exit(w.disp);
 		pty.end = pty.buf + result;
 	}
 
@@ -869,7 +852,7 @@ static void tputc(u8 u)
 static void __attribute__((noreturn)) run(void)
 {
 	fd_set read_fds;
-	int xfd = XConnectionNumber(w.dpy);
+	int xfd = XConnectionNumber(w.disp);
 	int nfd = MAX(xfd, pty.fd) + 1;
 	const struct timespec timeout = { 0, 20000000 }; // 20ms
 	struct timespec now, last = { 0, 0 };
@@ -893,8 +876,8 @@ static void __attribute__((noreturn)) run(void)
 		}
 
 		XEvent e;
-		while (XPending(w.dpy)) {
-			XNextEvent(w.dpy, &e);
+		while (XPending(w.disp)) {
+			XNextEvent(w.disp, &e);
 			handle_xevent(&e);
 		}
 
@@ -926,18 +909,39 @@ static u16 default_color(u16 i, int rgb)
 	return i ? 55 + 40 * i : 0;
 }
 
-static void load_colors() {
-	Colormap colormap = DefaultColormap(w.dpy, DefaultScreen(w.dpy));
+static bool is_true(const char* word)
+{
+	return !strcasecmp(word, "true") || !strcasecmp(word, "yes") || !strcasecmp(word, "on");
+}
+
+static void load_resources() {
+	// Fonts
+	const char *face_name = get_resource("faceName", "mono");
+	const char *style[] = { "", "bold", "italic", "bold italic" };
+	char font_name[128];
+	for (int i = 0; i < 4; ++i) {
+		sprintf(font_name, "%s:style=%s", face_name, style[i]);
+		w.font[i] = XftFontOpenName(w.disp, DefaultScreen(w.disp), font_name);
+	}
+
+	// Colors
+	Colormap colormap = DefaultColormap(w.disp, DefaultScreen(w.disp));
 	char color_name[16] = "color";
 	char def[16] = "";
-
 	for (u16 i = 0; i < 256; ++i) {
 		sprintf(color_name + 5, "%d", i);
 		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
 		XColor *color = (XColor*) &colors[i];
-		XLookupColor(w.dpy, colormap, get_resource(color_name, def), color, color);
+		XLookupColor(w.disp, colormap, get_resource(color_name, def), color, color);
 		colors[i].color.alpha = 0xffff;
 	}
+
+	// Others
+	double scale_height = atof(get_resource("scaleHeight", "1"));
+	w.font_height = (int) ((w.font[0]->height + 1) * scale_height + .999);
+	w.font_width = w.font[0]->max_advance_width;
+	w.border = atoi(get_resource("borderWidth", "2"));
+	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
 }
 
 int main(int argc, char *argv[])
@@ -945,7 +949,7 @@ int main(int argc, char *argv[])
 	setlocale(LC_CTYPE, "");
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
 	create_window();
-	load_colors();
+	load_resources();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 	run();
 }
