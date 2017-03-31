@@ -24,7 +24,6 @@
 // Config
 #define LINE_SIZE 256
 #define HIST_SIZE 2048
-#define FPS 60
 #define DEFAULTFG 15
 
 // Macros
@@ -38,7 +37,6 @@
 #define SLINE(y)            (term.hist[(y) % HIST_SIZE])
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define die(message)        exit(fprintf(stderr, message ": %s\n", errno ? strerror(errno) : ""))
-#define TIMEDIFF(t1, t2)    ((t1.tv_sec - t2.tv_sec) * 1000 + (t1.tv_nsec - t2.tv_nsec) / 1000000)
 
 #define clear_selection()   (sel.ne.y = -1)
 #define IS_DELIM(c)         (strchr(" <>()[]{}'`\"", *(c)))
@@ -51,6 +49,7 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
+// Selection snapping modes
 enum { SNAP_WORD = 2, SNAP_LINE = 3 };
 
 enum {
@@ -67,16 +66,16 @@ enum {
 
 typedef struct {
 	u8 u[4];   // raw UTF-8 bytes
-	u16 mode;  // bitmask of ATTR_* flags
+	u16 attr;  // bitmask of ATTR_* flags
 	u8 fg;     // foreground color
 	u8 bg;     // background color
 } Rune;
 
-typedef struct {
-	Rune attr; // current char attributes
+static struct {
+	Rune rune; // current char attributes
 	int x;
 	int y;
-} TCursor;
+} cursor, saved_cursors[2];
 
 typedef struct {
 	int x;
@@ -105,8 +104,6 @@ static struct {
 	Rune hist[HIST_SIZE][LINE_SIZE];     // history ring buffer
 	int scroll;                          // hist index of the scroll position
 	int lines;                           // hist index of the last line
-	TCursor c;                           // cursor
-	TCursor saved_c[2];                  // saved cursors
 	int top;                             // top scroll limit
 	int bot;                             // bottom scroll limit
 	int cursor_style;
@@ -156,35 +153,35 @@ static void move_region(int start, int end, int diff) {
 }
 
 static void move_chars(bool forward, int diff) {
-	int dst = term.c.x + (forward ? diff : 0);
-	int src = term.c.x + (forward ? 0 : diff);
-	int size = pty.cols - (term.c.x + diff);
-	int del = (forward ? term.c.x : pty.cols - diff);
-	Rune *line = TLINE(term.c.y);
+	int dst = cursor.x + (forward ? diff : 0);
+	int src = cursor.x + (forward ? 0 : diff);
+	int size = pty.cols - (cursor.x + diff);
+	int del = (forward ? cursor.x : pty.cols - diff);
+	Rune *line = TLINE(cursor.y);
 	memmove(line + dst, line + src, size * sizeof(Rune));
-	clear_region(del, term.c.y, del + diff - 1, term.c.y);
+	clear_region(del, cursor.y, del + diff - 1, cursor.y);
 }
 
 static void move_to(int x, int y)
 {
-	term.c.x = LIMIT(x, 0, pty.cols - 1);
-	term.c.y = LIMIT(y, 0, pty.rows - 1);
+	cursor.x = LIMIT(x, 0, pty.cols - 1);
+	cursor.y = LIMIT(y, 0, pty.rows - 1);
 }
 
 static void swap_screen(void)
 {
 	clear_selection();
-	term.saved_c[term.alt] = term.c;
+	saved_cursors[term.alt] = cursor;
 	term.alt = !term.alt;
-	term.c = term.saved_c[term.alt];
+	cursor = saved_cursors[term.alt];
 	term.lines += term.alt ? pty.rows : -pty.rows;
 	term.scroll = term.lines;
 }
 
 static void newline()
 {
-	if (term.c.y != term.bot) {
-		move_to(term.c.x, term.c.y + 1);
+	if (cursor.y != term.bot) {
+		move_to(cursor.x, cursor.y + 1);
 	} else if (term.top || term.alt) {
 		move_region(term.top, term.bot, 1);
 	} else {
@@ -321,36 +318,36 @@ static void create_window(void)
 
 static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 {
-	bool bold = (rune.mode & ATTR_BOLD) != 0;
-	bool italic = (rune.mode & (ATTR_ITALIC | ATTR_BLINK)) != 0;
+	bool bold = (rune.attr & ATTR_BOLD) != 0;
+	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = xw.font[bold + 2 * italic];
 	XftColor fg = colors[rune.fg ? rune.fg : DEFAULTFG];
 	XftColor bg = colors[rune.bg];
 	int baseline = y + font->ascent;
 	int width = len * xw.font_width;
 
-	if (rune.mode & ATTR_INVISIBLE) {
+	if (rune.attr & ATTR_INVISIBLE) {
 		fg = bg;
-	} else if (rune.mode & ATTR_FAINT) {
+	} else if (rune.attr & ATTR_FAINT) {
 		fg.color.red /= 2;
 		fg.color.green /= 2;
 		fg.color.blue /= 2;
 	}
 
-	if (rune.mode & ATTR_REVERSE)
+	if (rune.attr & ATTR_REVERSE)
 		SWAP(fg, bg);
 
 	// Draw the background, then the text, then decorations
 	XftDrawRect(xw.draw, &bg, x, y, width, xw.font_height);
 	XftDrawStringUtf8(xw.draw, &fg, font, x, baseline, text, len);
 
-	if (rune.mode & ATTR_UNDERLINE)
+	if (rune.attr & ATTR_UNDERLINE)
 		XftDrawRect(xw.draw, &fg, x, baseline + 1, width, 1);
 
-	if (rune.mode & ATTR_STRUCK)
+	if (rune.attr & ATTR_STRUCK)
 		XftDrawRect(xw.draw, &fg, x, (2 * baseline + y) / 3, width, 1);
 
-	if (rune.mode & ATTR_BAR)
+	if (rune.attr & ATTR_BAR)
 		XftDrawRect(xw.draw, &fg, x, y, 2, xw.font_height);
 }
 
@@ -366,16 +363,16 @@ static void draw_rune(int x, int y)
 
 	// Handle selection and cursor
 	if (selected(x, y + term.scroll))
-		rune.mode ^= ATTR_REVERSE;
+		rune.attr ^= ATTR_REVERSE;
 
-	int cursor = term.hide || term.scroll != term.lines ? 0 :
+	int cursor_attr = term.hide || term.scroll != term.lines ? 0 :
 		xw.focused && term.cursor_style < 3 ? ATTR_REVERSE :
 		term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 
-	if (x == term.c.x && y == term.c.y)
-		rune.mode ^= cursor;
+	if (x == cursor.x && y == cursor.y)
+		rune.attr ^= cursor_attr;
 
-	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.mode != prev.mode;
+	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
 
 	if (x == 0 || diff) {
 		draw_text(prev, buf, len, draw_x, draw_y);
@@ -428,16 +425,19 @@ static void on_keypress(XKeyEvent *e)
 		[110] = 'P', 'Q', 'R', 'S', 15, 17, 18, 19, 20, 21, 23, 24,  // function keys
 	};
 
-	char buf[8] = "";
-	KeySym keysym;
-	XLookupString(e, buf, LEN(buf) - 1, &keysym, NULL);
-
-	if (selected(term.c.x, term.c.y + term.scroll))
-		clear_selection();
-
 	bool shift = (e->state & ShiftMask) != 0;
 	bool ctrl = (e->state & ControlMask) != 0;
-	bool alt = (e->state & Mod1Mask) != 0;
+	bool meta = (e->state & Mod1Mask) != 0;
+
+	char buf[8] = "";
+	KeySym keysym;
+	int len = XLookupString(e, buf, LEN(buf) - 1, &keysym, NULL);
+
+	if (selected(cursor.x, cursor.y + term.scroll))
+		clear_selection();
+
+	if (len && meta)
+		dprintf(pty.fd, "%c", 033);
 
 	if (shift && keysym == XK_Insert)
 		paste(false);
@@ -454,9 +454,9 @@ static void on_keypress(XKeyEvent *e)
 	else if (keysym == XK_BackSpace)
 		dprintf(pty.fd, "%c", ctrl ? 027 : 0177);
 	else if (BETWEEN(keysym, 0xff50, 0xffff) && codes[keysym - 0xff50])
-		special_key(codes[keysym - 0xff50], 4 * ctrl + 2 * alt + shift);
-	else if (*buf)
-		dprintf(pty.fd, "%s%s", alt ? "\033" : "", buf);
+		special_key(codes[keysym - 0xff50], 4 * ctrl + 2 * meta + shift);
+	else if (len)
+		write(pty.fd, buf, len);
 }
 
 static void on_resize(XConfigureEvent *e)
@@ -470,7 +470,7 @@ static void on_resize(XConfigureEvent *e)
 	pty.rows = MIN((u16) pty_size.y, HIST_SIZE / 2);
 	term.top = 0;
 	term.bot = pty.rows - 1;
-	move_to(term.c.x, term.c.y);
+	move_to(cursor.x, cursor.y);
 
 	// Update X window data
 	if (xw.pixmap)
@@ -542,6 +542,11 @@ static void handle_xevent(XEvent * e)
 	case KeyPress:
 		on_keypress((XKeyEvent*) e);
 		break;
+	case ButtonPress:
+	case ButtonRelease:
+	case MotionNotify:
+		on_mouse((XButtonEvent*) e);
+		break;
 	case ConfigureNotify:
 		on_resize((XConfigureEvent*) e);
 		break;
@@ -554,15 +559,10 @@ static void handle_xevent(XEvent * e)
 		if (term.report_focus)
 			dprintf(pty.fd, "\033[%c", xw.focused ? 'I' : 'O');
 		break;
-	case ButtonPress:
-	case ButtonRelease:
-	case MotionNotify:
-		on_mouse((XButtonEvent*) e);
-		break;
 	}
 }
 
-static char pty_getchar(void)
+static u8 pty_getchar(void)
 {
 	if (pty.c >= pty.end) {
 		pty.c = pty.buf;
@@ -590,21 +590,21 @@ static void pty_new(char* cmd[])
 
 static int set_attr(int *attr)
 {
-	u8 *color = &term.c.attr.fg;
+	u8 *color = &cursor.rune.fg;
 	if (BETWEEN(*attr, 40, 49) || BETWEEN(*attr, 100, 107)) {
-		color = &term.c.attr.bg;
+		color = &cursor.rune.bg;
 		*attr -= 10;
 	}
 
 	switch (*attr) {
 	case 0:
-		memset(&term.c.attr, 0, sizeof(term.c.attr));
+		memset(&cursor.rune, 0, sizeof(cursor.rune));
 		return 1;
 	case 1 ... 9:
-		term.c.attr.mode |= 1 << (*attr - 1);
+		cursor.rune.attr |= 1 << (*attr - 1);
 		return 1;
 	case 21 ... 29:
-		term.c.attr.mode &= ~(1 << (*attr - 21));
+		cursor.rune.attr &= ~(1 << (*attr - 21));
 		return 1;
 	case 30 ... 37:
 		*color = (u8) (*attr - 30);
@@ -671,55 +671,55 @@ static void handle_csi()
 	case '<' ... '?': // Private parameter bytes
 		goto csi;
 	case 'A': // CUU -- Cursor <n> Up
-		move_to(term.c.x, term.c.y - MAX(*arg, 1));
+		move_to(cursor.x, cursor.y - MAX(*arg, 1));
 		break;
 	case 'B': // CUD -- Cursor <n> Down
 	case 'e': // VPR -- Cursor <n> Down
-		move_to(term.c.x, term.c.y + MAX(*arg, 1));
+		move_to(cursor.x, cursor.y + MAX(*arg, 1));
 		break;
 	case 'C': // CUF -- Cursor <n> Forward
 	case 'a': // HPR -- Cursor <n> Forward
-		move_to(term.c.x + MAX(*arg, 1), term.c.y);
+		move_to(cursor.x + MAX(*arg, 1), cursor.y);
 		break;
 	case 'D': // CUB -- Cursor <n> Backward
-		move_to(term.c.x - MAX(*arg, 1), term.c.y);
+		move_to(cursor.x - MAX(*arg, 1), cursor.y);
 		break;
 	case 'E': // CNL -- Cursor <n> Down and first col
-		move_to(0, term.c.y + MAX(*arg, 1));
+		move_to(0, cursor.y + MAX(*arg, 1));
 		break;
 	case 'F': // CPL -- Cursor <n> Up and first col
-		move_to(0, term.c.y + MAX(*arg, 1));
+		move_to(0, cursor.y + MAX(*arg, 1));
 		break;
 	case 'G': // CHA -- Move to <col>
 	case '`': // HPA -- Move to <col>
-		move_to(*arg - 1, term.c.y);
+		move_to(*arg - 1, cursor.y);
 		break;
 	case 'H': // CUP -- Move to <row> <col>
 	case 'f': // HVP -- Move to <row> <col>
 		move_to(arg[1] - 1, arg[0] - 1);
 		break;
 	case 'I': // CHT -- Cursor forward <n> tabulation stops
-		move_to(((term.c.x >> 3) + MAX(*arg, 1)) << 3, term.c.y);
+		move_to(((cursor.x >> 3) + MAX(*arg, 1)) << 3, cursor.y);
 		break;
 	case 'J': // ED -- Clear screen
 	case 'K': // EL -- Clear line
 		clear_region(
-			*arg ? 0 : term.c.x,
-			*arg && command == 'J' ? 0 : term.c.y,
-			*arg == 1 ? term.c.x : pty.cols - 1,
-			*arg == 1 || command == 'K' ? term.c.y : pty.rows - 1);
+			*arg ? 0 : cursor.x,
+			*arg && command == 'J' ? 0 : cursor.y,
+			*arg == 1 ? cursor.x : pty.cols - 1,
+			*arg == 1 || command == 'K' ? cursor.y : pty.rows - 1);
 		break;
 	case 'L': // IL -- Insert <n> blank lines
 	case 'M': // DL -- Delete <n> lines
-		if (BETWEEN(term.c.y, term.top, term.bot)) {
-			LIMIT(*arg, 1, term.bot - term.c.y + 1);
-			move_region(term.c.y, term.bot, command == 'L' ? -*arg : *arg);
-			term.c.x = 0;
+		if (BETWEEN(cursor.y, term.top, term.bot)) {
+			LIMIT(*arg, 1, term.bot - cursor.y + 1);
+			move_region(cursor.y, term.bot, command == 'L' ? -*arg : *arg);
+			cursor.x = 0;
 		}
 		break;
 	case 'P': // DCH -- Delete <n> char
 	case '@': // ICH -- Insert <n> blank char
-		LIMIT(*arg, 1, pty.cols - term.c.x);
+		LIMIT(*arg, 1, pty.cols - cursor.x);
 		move_chars(command == '@', *arg);
 		break;
 	case 'S': // SU -- Scroll <n> line up
@@ -728,18 +728,18 @@ static void handle_csi()
 		move_region(term.top, term.bot, command == 'T' ? -*arg : *arg);
 		break;
 	case 'X': // ECH -- Erase <n> char
-		LIMIT(*arg, 1, pty.cols - term.c.x);
-		clear_region(term.c.x, term.c.y, term.c.x + *arg - 1, term.c.y);
+		LIMIT(*arg, 1, pty.cols - cursor.x);
+		clear_region(cursor.x, cursor.y, cursor.x + *arg - 1, cursor.y);
 		break;
 	case 'Z': // CBT -- Cursor backward <n> tabulation stops
-		move_to(((term.c.x >> 3) - MAX(*arg, 1)) << 3, term.c.y);
+		move_to(((cursor.x >> 3) - MAX(*arg, 1)) << 3, cursor.y);
 		break;
 	case 'c': // DA -- Device Attributes
 		if (*arg == 0)
 			dprintf(pty.fd, "%s", "\033[?64;15;22c");
 		break;
 	case 'd': // VPA -- Move to <row>
-		move_to(term.c.x, *arg - 1);
+		move_to(cursor.x, *arg - 1);
 		break;
 	case 'h': // SM -- Set Mode
 	case 'l': // RM -- Reset Mode
@@ -751,7 +751,7 @@ static void handle_csi()
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 6)
-			dprintf(pty.fd, "\033[%i;%iR", term.c.y + 1, term.c.x + 1);
+			dprintf(pty.fd, "\033[%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
 	case 'p': // DECSTR -- Soft terminal reset
 		memset(&term.top, 0, sizeof(term) - ((char*) &term.top - (char*) &term));
@@ -771,40 +771,40 @@ static void handle_csi()
 		}
 		break;
 	case 's': // DECSC -- Save cursor position
-		term.saved_c[term.alt] = term.c;
+		saved_cursors[term.alt] = cursor;
 		break;
 	case 'u': // DECRC -- Restore cursor position
-		term.c = term.saved_c[term.alt];
+		cursor = saved_cursors[term.alt];
 		break;
 	}
 }
 
+//
 static void handle_esc(u8 second_byte)
 {
-	u8 final_byte = ' ';
+	u8 final_byte = second_byte;
+	while (BETWEEN(final_byte, ' ', '/'))
+		final_byte = pty_getchar();
 
 	switch (second_byte) {
-	case ' ' ... '/':
-		while (BETWEEN(final_byte, ' ', '/'))
-			final_byte = pty_getchar();
-		if (BETWEEN(second_byte, '(', '+'))
-			term.charset[second_byte - '('] = final_byte;
+	case '(' ... '+':
+		term.charset[second_byte - '('] = final_byte;
 		break;
 	case '7': // DECSC -- Save Cursor
-		term.saved_c[term.alt] = term.c;
+		saved_cursors[term.alt] = cursor;
 		break;
 	case '8': // DECRC -- Restore Cursor
-		term.c = term.saved_c[term.alt];
+		cursor = saved_cursors[term.alt];
 		break;
 	case 'E': // NEL -- Next line
 		newline();
-		term.c.x = 0;
+		cursor.x = 0;
 		break;
 	case 'M': // RI -- Reverse index
-		if (term.c.y <= term.top)
+		if (cursor.y <= term.top)
 			move_region(term.top, term.bot, -1);
 		else
-			--term.c.y;
+			--cursor.y;
 		break;
 	case '[': // CSI -- Control Sequence Introducer
 		handle_csi();
@@ -834,16 +834,16 @@ static void tputc(u8 u)
 
 	switch (u) {
 	case '\b':
-		move_to(term.c.x - 1, term.c.y);
+		move_to(cursor.x - 1, cursor.y);
 		return;
 	case '\t':
-		move_to(((term.c.x >> 3) + 1) << 3, term.c.y);
+		move_to(((cursor.x >> 3) + 1) << 3, cursor.y);
 		return;
 	case '\n' ... '\f':
 		newline();
 		return;
 	case '\r':
-		term.c.x = 0;
+		cursor.x = 0;
 		return;
 	case '\016': // LS1 -- Locking shift 1
 	case '\017': // LS0 -- Locking shift 0
@@ -860,21 +860,20 @@ static void tputc(u8 u)
 		// FALLTHROUGH
 	case ' ' ... '~':
 	case 192 ... 255:
-		if (term.c.x == pty.cols) {
+		if (cursor.x == pty.cols) {
 			newline();
-			term.c.x = 0;
+			cursor.x = 0;
 		}
 
-		rune = &TLINE(term.c.y)[term.c.x];
-		*rune = term.c.attr;
-		rune->u[0] = u;
+		rune = &TLINE(cursor.y)[cursor.x];
+		*cursor.rune.u = u;
+		*rune = cursor.rune;
 		utf_len = UTF_LEN(u);
 		i = 1;
+		++cursor.x;
 
 		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
 			memcpy(rune->u, line_drawing + (u - 'j') * 3, 3);
-
-		++term.c.x;
 	}
 }
 
@@ -883,7 +882,7 @@ static void __attribute__((noreturn)) run(void)
 	fd_set read_fds;
 	int xfd = XConnectionNumber(xw.dpy);
 	int nfd = MAX(xfd, pty.fd) + 1;
-	const struct timespec timeout = { 0, 1000000000 / FPS };
+	const struct timespec timeout = { 0, 20000000 }; // 20ms
 	struct timespec now, last = { 0, 0 };
 	bool dirty = true;
 
@@ -911,7 +910,8 @@ static void __attribute__((noreturn)) run(void)
 		}
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (dirty && xw.visible && TIMEDIFF(now, last) > 1000 / FPS) {
+
+		if (now.tv_sec > last.tv_sec || (dirty && xw.visible && now.tv_nsec > last.tv_nsec + 20000000)) {
 			draw();
 			dirty = false;
 			last = now;

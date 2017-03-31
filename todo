@@ -1,5 +1,5 @@
-* Black screen after re-focusing?
 * set TERM
+* occasionnal segfault on startup?
 * handle reverseVideo
 * handle metaSendsEscape
 * handle backarrowKey
