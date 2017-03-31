@@ -115,9 +115,7 @@ static struct {
 // Drawing Context
 static struct {
 	Display *dpy;
-	Window win;
 	XftFont *font[4];
-	Pixmap pixmap;
 	GC gc;
 	XftDraw *draw;
 	char *font_name;
@@ -126,7 +124,7 @@ static struct {
 	int border;
 	bool visible: 16;
 	bool focused: 16;
-} xw;
+} w;
 
 static XftColor colors[256];
 
@@ -201,8 +199,8 @@ static void scroll(int n)
 
 static Point pixel2cell(int px, int py)
 {
-	int x = (px - xw.border) / xw.font_width;
-	int y = (py - xw.border) / xw.font_height;
+	int x = (px - w.border) / w.font_width;
+	int y = (py - w.border) / w.font_height;
 	return (Point) { x, y };
 }
 
@@ -267,20 +265,20 @@ static bool selected(int x, int y)
 static int __attribute__((noreturn)) clean_exit(Display *dpy)
 {
 	for (int i = 0; i < 4; ++i)
-		XftFontClose(dpy, xw.font[i]);
+		XftFontClose(dpy, w.font[i]);
 	XCloseDisplay(dpy);
 	exit(0);
 }
 
 static const char* get_resource(const char* resource, const char* fallback)
 {
-	char* result = XGetDefault(xw.dpy, "vvvvvt", resource);
+	char* result = XGetDefault(w.dpy, "vvvvvt", resource);
 	return result ? result : fallback;
 }
 
 static void create_window(void)
 {
-	if (!(xw.dpy = XOpenDisplay(0)))
+	if (!(w.dpy = XOpenDisplay(0)))
 		die("Failed to open display");
 
 	// Load fonts
@@ -289,13 +287,13 @@ static void create_window(void)
 	char font_name[128];
 	for (int i = 0; i < 4; ++i) {
 		sprintf(font_name, "%s:style=%s", face_name, style[i]);
-		xw.font[i] = XftFontOpenName(xw.dpy, DefaultScreen(xw.dpy), font_name);
+		w.font[i] = XftFontOpenName(w.dpy, DefaultScreen(w.dpy), font_name);
 	}
 
 	double scale_height = atof(get_resource("scaleHeight", "1"));
-	xw.font_height = (int) ((xw.font[0]->height + 1) * scale_height + .999);
-	xw.font_width = xw.font[0]->max_advance_width;
-	xw.border = atoi(get_resource("borderWidth", "2"));
+	w.font_height = (int) ((w.font[0]->height + 1) * scale_height + .999);
+	w.font_width = w.font[0]->max_advance_width;
+	w.border = atoi(get_resource("borderWidth", "2"));
 
 	// Events
 	XSetIOErrorHandler(clean_exit);
@@ -304,27 +302,29 @@ static void create_window(void)
 	attrs.event_mask |= KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 
 	// Create and map the window
-	Window parent = XRootWindow(xw.dpy, DefaultScreen(xw.dpy));
-	xw.win = XCreateSimpleWindow(xw.dpy, parent, 0, 0, 1, 1, 0, CopyFromParent, CopyFromParent);
-	XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &attrs);
-	XMapWindow(xw.dpy, xw.win);
-	XStoreName(xw.dpy, xw.win, "vvvvvt");
+	Window parent = XRootWindow(w.dpy, DefaultScreen(w.dpy));
+	Window win = XCreateSimpleWindow(w.dpy, parent, 0, 0, 1, 1, 0, CopyFromParent, CopyFromParent);
+	XChangeWindowAttributes(w.dpy, win, CWEventMask, &attrs);
+	XStoreName(w.dpy, win, "vvvvvt");
+	XDefineCursor(w.dpy, win, XCreateFontCursor(w.dpy, XC_xterm));
+	XMapWindow(w.dpy, win);
 
 	// Graphic context
 	XGCValues gcvalues = { .graphics_exposures = False };
-	xw.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures, &gcvalues);
-	XDefineCursor(xw.dpy, xw.win, XCreateFontCursor(xw.dpy, XC_xterm));
+	w.gc = XCreateGC(w.dpy, parent, GCGraphicsExposures, &gcvalues);
+	Visual *visual = DefaultVisual(w.dpy, DefaultScreen(w.dpy));
+	w.draw = XftDrawCreate(w.dpy, win, visual, CopyFromParent);
 }
 
 static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 {
 	bool bold = (rune.attr & ATTR_BOLD) != 0;
 	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
-	XftFont *font = xw.font[bold + 2 * italic];
+	XftFont *font = w.font[bold + 2 * italic];
 	XftColor fg = colors[rune.fg ? rune.fg : DEFAULTFG];
 	XftColor bg = colors[rune.bg];
 	int baseline = y + font->ascent;
-	int width = len * xw.font_width;
+	int width = len * w.font_width;
 
 	if (rune.attr & ATTR_INVISIBLE) {
 		fg = bg;
@@ -338,17 +338,17 @@ static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 		SWAP(fg, bg);
 
 	// Draw the background, then the text, then decorations
-	XftDrawRect(xw.draw, &bg, x, y, width, xw.font_height);
-	XftDrawStringUtf8(xw.draw, &fg, font, x, baseline, text, len);
+	XftDrawRect(w.draw, &bg, x, y, width, w.font_height);
+	XftDrawStringUtf8(w.draw, &fg, font, x, baseline, text, len);
 
 	if (rune.attr & ATTR_UNDERLINE)
-		XftDrawRect(xw.draw, &fg, x, baseline + 1, width, 1);
+		XftDrawRect(w.draw, &fg, x, baseline + 1, width, 1);
 
 	if (rune.attr & ATTR_STRUCK)
-		XftDrawRect(xw.draw, &fg, x, (2 * baseline + y) / 3, width, 1);
+		XftDrawRect(w.draw, &fg, x, (2 * baseline + y) / 3, width, 1);
 
 	if (rune.attr & ATTR_BAR)
-		XftDrawRect(xw.draw, &fg, x, y, 2, xw.font_height);
+		XftDrawRect(w.draw, &fg, x, y, 2, w.font_height);
 }
 
 // Draws the rune at the given terminal coordinates.
@@ -366,7 +366,7 @@ static void draw_rune(int x, int y)
 		rune.attr ^= ATTR_REVERSE;
 
 	int cursor_attr = term.hide || term.scroll != term.lines ? 0 :
-		xw.focused && term.cursor_style < 3 ? ATTR_REVERSE :
+		w.focused && term.cursor_style < 3 ? ATTR_REVERSE :
 		term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 
 	if (x == cursor.x && y == cursor.y)
@@ -377,8 +377,8 @@ static void draw_rune(int x, int y)
 	if (x == 0 || diff) {
 		draw_text(prev, buf, len, draw_x, draw_y);
 		len = 0;
-		draw_x = xw.border + x * xw.font_width;
-		draw_y = xw.border + y * xw.font_height;
+		draw_x = w.border + x * w.font_width;
+		draw_y = w.border + y * w.font_height;
 		prev = rune;
 	}
 
@@ -397,14 +397,11 @@ static void draw_rune(int x, int y)
 // Redraws all runes on our buffer, then flushes it to the window.
 static void draw(void)
 {
-	XftDrawRect(xw.draw, colors, 0, 0, xw.width, xw.height);
-
 	for (int y = 0; y < pty.rows; ++y)
 		for (int x = 0; x < pty.cols; ++x)
 			draw_rune(x, y);
 	draw_rune(0, 0);
-
-	XCopyArea(xw.dpy, xw.pixmap, xw.win, xw.gc, 0, 0, xw.width, xw.height, 0, 0);
+	XFlush(w.dpy);
 }
 
 static void special_key(u8 c, int state)
@@ -461,7 +458,7 @@ static void on_keypress(XKeyEvent *e)
 
 static void on_resize(XConfigureEvent *e)
 {
-	if (e->width == xw.width && e->height == xw.height)
+	if (e->width == w.width && e->height == w.height)
 		return;
 
 	// Update terminal info
@@ -473,20 +470,12 @@ static void on_resize(XConfigureEvent *e)
 	move_to(cursor.x, cursor.y);
 
 	// Update X window data
-	if (xw.pixmap)
-		XFreePixmap(xw.dpy, xw.pixmap);
-	if (xw.draw)
-		XftDrawDestroy(xw.draw);
-
-	Visual *visual = DefaultVisual(xw.dpy, DefaultScreen(xw.dpy));
-	xw.width = e->width;
-	xw.height = e->height;
-	xw.pixmap = XCreatePixmap(xw.dpy, xw.win, xw.width, xw.height, 24);
-	xw.draw = XftDrawCreate(xw.dpy, xw.pixmap, visual, CopyFromParent);
+	w.width = e->width;
+	w.height = e->height;
 
 	// Send our size to the pty driver so that applications can query it
-	struct winsize w = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
-	if (ioctl(pty.fd, TIOCSWINSZ, &w) < 0)
+	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
+	if (ioctl(pty.fd, TIOCSWINSZ, &size) < 0)
 		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
 }
 
@@ -551,13 +540,13 @@ static void handle_xevent(XEvent * e)
 		on_resize((XConfigureEvent*) e);
 		break;
 	case VisibilityNotify:
-		xw.visible = ((XVisibilityEvent*) e)->state != VisibilityFullyObscured;
+		w.visible = ((XVisibilityEvent*) e)->state != VisibilityFullyObscured;
 		break;
 	case FocusIn:
 	case FocusOut:
-		xw.focused = e->type == FocusIn;
+		w.focused = e->type == FocusIn;
 		if (term.report_focus)
-			dprintf(pty.fd, "\033[%c", xw.focused ? 'I' : 'O');
+			dprintf(pty.fd, "\033[%c", w.focused ? 'I' : 'O');
 		break;
 	}
 }
@@ -568,7 +557,7 @@ static u8 pty_getchar(void)
 		pty.c = pty.buf;
 		long result = read(pty.fd, pty.buf, BUFSIZ);
 		if (result < 0)
-			clean_exit(xw.dpy);
+			clean_exit(w.dpy);
 		pty.end = pty.buf + result;
 	}
 
@@ -880,7 +869,7 @@ static void tputc(u8 u)
 static void __attribute__((noreturn)) run(void)
 {
 	fd_set read_fds;
-	int xfd = XConnectionNumber(xw.dpy);
+	int xfd = XConnectionNumber(w.dpy);
 	int nfd = MAX(xfd, pty.fd) + 1;
 	const struct timespec timeout = { 0, 20000000 }; // 20ms
 	struct timespec now, last = { 0, 0 };
@@ -904,14 +893,14 @@ static void __attribute__((noreturn)) run(void)
 		}
 
 		XEvent e;
-		while (XPending(xw.dpy)) {
-			XNextEvent(xw.dpy, &e);
+		while (XPending(w.dpy)) {
+			XNextEvent(w.dpy, &e);
 			handle_xevent(&e);
 		}
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
 
-		if (now.tv_sec > last.tv_sec || (dirty && xw.visible && now.tv_nsec > last.tv_nsec + 20000000)) {
+		if (now.tv_sec > last.tv_sec || (dirty && w.visible && now.tv_nsec > last.tv_nsec + 20000000)) {
 			draw();
 			dirty = false;
 			last = now;
@@ -938,7 +927,7 @@ static u16 default_color(u16 i, int rgb)
 }
 
 static void load_colors() {
-	Colormap colormap = DefaultColormap(xw.dpy, DefaultScreen(xw.dpy));
+	Colormap colormap = DefaultColormap(w.dpy, DefaultScreen(w.dpy));
 	char color_name[16] = "color";
 	char def[16] = "";
 
@@ -946,7 +935,7 @@ static void load_colors() {
 		sprintf(color_name + 5, "%d", i);
 		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
 		XColor *color = (XColor*) &colors[i];
-		XLookupColor(xw.dpy, colormap, get_resource(color_name, def), color, color);
+		XLookupColor(w.dpy, colormap, get_resource(color_name, def), color, color);
 		colors[i].color.alpha = 0xffff;
 	}
 }
