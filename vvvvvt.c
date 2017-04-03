@@ -29,27 +29,29 @@
 #define HIST_SIZE 2048
 
 // Macros
-#define LEN(a)              (sizeof(a) / sizeof(*(a)))
-#define MIN(a, b)           ((a) > (b) ? (b) : (a))
-#define MAX(a, b)           ((a) < (b) ? (b) : (a))
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
-#define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : 4)
+#define LEN(a)              (sizeof(a) / sizeof(*(a)))
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
+#define MAX(a, b)           ((a) < (b) ? (b) : (a))
+#define MIN(a, b)           ((a) > (b) ? (b) : (a))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
-#define SLINE(y)            (term.hist[(y) % HIST_SIZE])
-#define TLINE(y)            (SLINE((y) + term.scroll))
-#define die(message)        exit(fprintf(stderr, message ": %s\n", errno ? strerror(errno) : ""))
 
-#define clear_selection()   (sel.ne.y = -1)
 #define IS_DELIM(c)         (strchr(" <>()[]{}'`\"", *(c)))
 #define POINT_EQ(a, b)      ((a).x == (b).x && (a).y == (b).y)
 #define POINT_GT(a, b)      ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
+#define SLINE(y)            (term.hist[(y) % HIST_SIZE])
+#define TLINE(y)            (SLINE((y) + term.scroll))
+#define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
+#define clear_selection()   (sel.ne.y = -1)
+#define die(message)        exit(fprintf(stderr, message ": %s\n", errno ? strerror(errno) : ""))
 
 typedef enum { false, true } bool;
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+
+static u32 utf_len[16] = { 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 0, 0 };
 
 // Selection snapping modes
 enum { SNAP_WORD = 2, SNAP_LINE = 3 };
@@ -432,12 +434,11 @@ static void draw_rune(int x, int y)
 		prev = rune;
 	}
 
-	u32 utf_len = UTF_LEN(*rune.u);
 	if (*rune.u < 0x80) {
 		buf[len++] = MAX(*rune.u, ' ');
-	} else if (BETWEEN(*rune.u, 0xC0, 0xF7) && strnlen((char*) rune.u, 4) == utf_len) {
-		memcpy(buf + len, rune.u, utf_len);
-		len += utf_len;
+	} else if (*rune.u >= 0xC0 && strnlen((char*) rune.u, 4) == UTF_LEN(*rune.u)) {
+		memcpy(buf + len, rune.u, UTF_LEN(*rune.u));
+		len += UTF_LEN(*rune.u);
 	} else {
 		memcpy(buf + len, "⁇", 3);
 		len += 3;
@@ -872,6 +873,7 @@ static void handle_esc(u8 second_byte)
 
 static void pty_putchar(u8 u)
 {
+invalid_utf8:
 	switch (u) {
 	case '\b':
 		move_to(cursor.x - 1, cursor.y);
@@ -897,23 +899,21 @@ static void pty_putchar(u8 u)
 			newline();
 			cursor.x = 0;
 		}
+
 		cursor.rune.u[0] = u;
 		Rune *rune = &TLINE(cursor.y)[cursor.x];
 		*rune = cursor.rune;
 		++cursor.x;
 
-		for (long i = 1; i < UTF_LEN(u); ++i) {
-			u8 continuation = pty_getchar();
-			if (!BETWEEN(continuation, 128, 191)) {
-				pty_putchar(continuation);
-				return;
-			}
-			rune->u[i] = continuation;
+		for (long i = 1, len = UTF_LEN(u); i < len; ++i) {
+			u = pty_getchar();
+			if (!BETWEEN(u, 128, 191))
+				goto invalid_utf8;
+			rune->u[i & 3] = u;
 		}
 
 		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
 			memcpy(rune, &"┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│"[(u - 'j') * 3], 3);
-
 	}
 }
 
