@@ -4,6 +4,7 @@
 #include <X11/X.h>
 #include <X11/Xft/Xft.h>
 #include <X11/Xlib.h>
+#include <X11/Xresource.h>
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
@@ -17,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <time.h>
@@ -127,6 +129,7 @@ static struct {
 } w;
 
 static XftColor colors[256];
+static XrmDatabase xrm;
 
 static void clear_region(int x1, int y1, int x2, int y2)
 {
@@ -266,14 +269,9 @@ static int __attribute__((noreturn)) clean_exit(Display *disp)
 {
 	for (int i = 0; i < 4; ++i)
 		XftFontClose(disp, w.font[i]);
+	XrmDestroyDatabase(xrm);
 	XCloseDisplay(disp);
 	exit(0);
-}
-
-static const char* get_resource(const char* resource, const char* fallback)
-{
-	char* result = XGetDefault(w.disp, "vvvvvt", resource);
-	return result ? result : fallback;
 }
 
 static void create_window(void)
@@ -296,6 +294,76 @@ static void create_window(void)
 	XStoreName(w.disp, win, "vvvvvt");
 	XDefineCursor(w.disp, win, XCreateFontCursor(w.disp, XC_xterm));
 	XMapWindow(w.disp, win);
+}
+
+static u16 default_color(u16 i, int rgb)
+{
+	u16 theme[] = {
+		0000, 0610, 0151, 0540, 0037, 0606, 0066, 0333,
+		0222, 0730, 0471, 0750, 0427, 0727, 0057, 0777,
+	};
+
+	if (i < 16) // 0 ... 15: 16 system colors
+		return 3 + 36 * ((theme[i] >> 3 * rgb) & 7);
+
+	if (i >= 232) // 232 ... 255: 24 grayscale colors
+		return 10 * (i - 232) + (u16[]) { 15, 5, 5 } [rgb];
+
+	// 16 ... 231: 6x6x6 color cube
+	i = (i - 16) / (u16[]) { 1, 6, 36 } [rgb] % 6;
+	return i ? 55 + 40 * i : 0;
+}
+
+static bool is_true(const char* word)
+{
+	return !strcasecmp(word, "true") || !strcasecmp(word, "yes") || !strcasecmp(word, "on");
+}
+
+static const char* get_resource(const char* resource, const char* fallback)
+{
+	char *type;
+	XrmValue result;
+	char name[32] = "vvvvvt.";
+	strcat(name, resource);
+	XrmGetResource(xrm, name, name, &type, &result);
+	return result.addr ? result.addr : fallback;
+}
+
+static void load_resources() {
+	if (xrm)
+		XrmDestroyDatabase(xrm);
+	xrm = XrmGetFileDatabase("/home/grimy/config/Xresources");
+
+	// Fonts
+	const char *face_name = get_resource("faceName", "mono");
+	const char *style[] = { "", "bold", "italic", "bold italic" };
+	char font_name[128];
+	for (int i = 0; i < 4; ++i) {
+		sprintf(font_name, "%s:style=%s", face_name, style[i]);
+		if (w.font[i])
+			XftFontClose(w.disp, w.font[i]);
+		w.font[i] = XftFontOpenName(w.disp, DefaultScreen(w.disp), font_name);
+	}
+
+	// Colors
+	Colormap colormap = DefaultColormap(w.disp, DefaultScreen(w.disp));
+	char color_name[16] = "color";
+	char def[16] = "";
+	for (u16 i = 0; i < 256; ++i) {
+		sprintf(color_name + 5, "%d", i);
+		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
+		XColor *color = (XColor*) &colors[i];
+		XLookupColor(w.disp, colormap, get_resource(color_name, def), color, color);
+		colors[i].color.alpha = 0xffff;
+	}
+
+	// Others
+	double scale_height = atof(get_resource("scaleHeight", "1"));
+	w.font_height = (int) ((w.font[0]->height + 1) * scale_height + .999);
+	w.font_width = w.font[0]->max_advance_width;
+	w.border = atoi(get_resource("borderWidth", "2"));
+	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
+	term.reverse = is_true(get_resource("reverseVideo", "on"));
 }
 
 static void draw_text(Rune rune, u8 *text, int len, int x, int y)
@@ -623,6 +691,9 @@ static void set_mode(bool set, int mode)
 	case 1004: // Report focus events
 		term.report_focus = set;
 		break;
+	case 1036: // DECSET -- meta sends escape
+		term.meta_sends_escape = set;
+		break;
 	}
 }
 
@@ -854,8 +925,16 @@ static void pty_putchar(u8 u)
 static void __attribute__((noreturn)) run(void)
 {
 	fd_set read_fds;
+
 	int xfd = XConnectionNumber(w.disp);
-	int nfd = MAX(xfd, pty.fd) + 1;
+	int ifd = inotify_init();
+	int nfd = MAX(ifd, MAX(xfd, pty.fd)) + 1;
+
+	char fname[256];
+	strcpy(fname, getenv("XDG_CONFIG_HOME"));
+	strcat(fname, "/Xresources");
+	inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
+
 	const struct timespec timeout = { 0, 20000000 }; // 20ms
 	struct timespec now, last = { 0, 0 };
 	bool dirty = true;
@@ -863,6 +942,7 @@ static void __attribute__((noreturn)) run(void)
 	for (;;) {
 		FD_ZERO(&read_fds);
 		FD_SET(pty.fd, &read_fds);
+		FD_SET(ifd, &read_fds);
 		FD_SET(xfd, &read_fds);
 
 		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
@@ -875,6 +955,13 @@ static void __attribute__((noreturn)) run(void)
 			pty_putchar(pty_getchar());
 			while (pty.c < pty.end)
 				pty_putchar(*pty.c++);
+		}
+
+		if (FD_ISSET(ifd, &read_fds)) {
+			u8 buf[BUFSIZ];
+			read(ifd, buf, BUFSIZ);
+			inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
+			load_resources();
 		}
 
 		XEvent e;
@@ -893,64 +980,11 @@ static void __attribute__((noreturn)) run(void)
 	}
 }
 
-static u16 default_color(u16 i, int rgb)
-{
-	u16 theme[] = {
-		0000, 0610, 0151, 0540, 0037, 0606, 0066, 0333,
-		0222, 0730, 0471, 0750, 0427, 0727, 0057, 0777,
-	};
-
-	if (i < 16) // 0 ... 15: 16 system colors
-		return 3 + 36 * ((theme[i] >> 3 * rgb) & 7);
-
-	if (i >= 232) // 232 ... 255: 24 grayscale colors
-		return 10 * (i - 232) + (u16[]) { 15, 5, 5 } [rgb];
-
-	// 16 ... 231: 6x6x6 color cube
-	i = (i - 16) / (u16[]) { 1, 6, 36 } [rgb] % 6;
-	return i ? 55 + 40 * i : 0;
-}
-
-static bool is_true(const char* word)
-{
-	return !strcasecmp(word, "true") || !strcasecmp(word, "yes") || !strcasecmp(word, "on");
-}
-
-static void load_resources() {
-	// Fonts
-	const char *face_name = get_resource("faceName", "mono");
-	const char *style[] = { "", "bold", "italic", "bold italic" };
-	char font_name[128];
-	for (int i = 0; i < 4; ++i) {
-		sprintf(font_name, "%s:style=%s", face_name, style[i]);
-		w.font[i] = XftFontOpenName(w.disp, DefaultScreen(w.disp), font_name);
-	}
-
-	// Colors
-	Colormap colormap = DefaultColormap(w.disp, DefaultScreen(w.disp));
-	char color_name[16] = "color";
-	char def[16] = "";
-	for (u16 i = 0; i < 256; ++i) {
-		sprintf(color_name + 5, "%d", i);
-		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
-		XColor *color = (XColor*) &colors[i];
-		XLookupColor(w.disp, colormap, get_resource(color_name, def), color, color);
-		colors[i].color.alpha = 0xffff;
-	}
-
-	// Others
-	double scale_height = atof(get_resource("scaleHeight", "1"));
-	w.font_height = (int) ((w.font[0]->height + 1) * scale_height + .999);
-	w.font_width = w.font[0]->max_advance_width;
-	w.border = atoi(get_resource("borderWidth", "2"));
-	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
-	term.reverse = is_true(get_resource("reverseVideo", "on"));
-}
-
 int main(int argc, char *argv[])
 {
 	setlocale(LC_CTYPE, "");
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
+	XrmInitialize();
 	create_window();
 	load_resources();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
