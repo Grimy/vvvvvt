@@ -33,7 +33,7 @@
 #define MIN(a, b)           ((a) > (b) ? (b) : (a))
 #define MAX(a, b)           ((a) < (b) ? (b) : (a))
 #define BETWEEN(x, a, b)    ((a) <= (x) && (x) <= (b))
-#define UTF_LEN(c)          ((c) < 0x80 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : 4)
+#define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : 4)
 #define LIMIT(x, a, b)      ((x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 #define SWAP(a, b)          do { __typeof(a) _swap = (a); (a) = (b); (b) = _swap; } while (0)
 #define SLINE(y)            (term.hist[(y) % HIST_SIZE])
@@ -872,11 +872,6 @@ static void handle_esc(u8 second_byte)
 
 static void pty_putchar(u8 u)
 {
-	static const char* line_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
-	static long i;
-	static long utf_len;
-	static Rune *rune;
-
 	switch (u) {
 	case '\b':
 		move_to(cursor.x - 1, cursor.y);
@@ -897,28 +892,28 @@ static void pty_putchar(u8 u)
 	case '\033': // ESC
 		handle_esc(pty_getchar());
 		return;
-	case 128 ... 191:
-		if (i < utf_len) {
-			rune->u[i++] = u;
-			return;
-		}
-		// FALLTHROUGH
-	case ' ' ... '~':
-	case 192 ... 255:
+	case ' ' ... 255:
 		if (cursor.x == pty.cols) {
 			newline();
 			cursor.x = 0;
 		}
-
-		rune = &TLINE(cursor.y)[cursor.x];
-		*cursor.rune.u = u;
+		cursor.rune.u[0] = u;
+		Rune *rune = &TLINE(cursor.y)[cursor.x];
 		*rune = cursor.rune;
-		utf_len = UTF_LEN(u);
-		i = 1;
 		++cursor.x;
 
+		for (long i = 1; i < UTF_LEN(u); ++i) {
+			u8 continuation = pty_getchar();
+			if (!BETWEEN(continuation, 128, 191)) {
+				pty_putchar(continuation);
+				return;
+			}
+			rune->u[i] = continuation;
+		}
+
 		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
-			memcpy(rune->u, line_drawing + (u - 'j') * 3, 3);
+			memcpy(rune, &"┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│"[(u - 'j') * 3], 3);
+
 	}
 }
 

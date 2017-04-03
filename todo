@@ -1,2 +1,3 @@
 * test under non-tiling WMs !!!
 * handle saveLines
+* handle 5 and 6 bytes UTF-8 sequence
