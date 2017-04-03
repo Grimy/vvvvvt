@@ -1,5 +1,2 @@
-* set TERM
 * test under non-tiling WMs !!!
-* handle reverseVideo
-* handle backarrowKey
 * handle saveLines

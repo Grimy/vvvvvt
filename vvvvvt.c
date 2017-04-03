@@ -25,7 +25,6 @@
 // Config
 #define LINE_SIZE 256
 #define HIST_SIZE 2048
-#define DEFAULTFG 15
 
 // Macros
 #define LEN(a)              (sizeof(a) / sizeof(*(a)))
@@ -111,7 +110,7 @@ static struct {
 	u8 charset[4];
 	bool report_buttons, report_motion, report_focus;
 	bool alt, hide, appcursor, line_drawing;
-	bool meta_sends_escape;
+	bool meta_sends_escape, reverse;
 } term;
 
 // Drawing Context
@@ -304,8 +303,8 @@ static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 	bool bold = (rune.attr & ATTR_BOLD) != 0;
 	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = w.font[bold + 2 * italic];
-	XftColor fg = colors[rune.fg ? rune.fg : DEFAULTFG];
-	XftColor bg = colors[rune.bg];
+	XftColor fg = colors[rune.fg || !term.reverse ? rune.fg : 15];
+	XftColor bg = colors[rune.bg ||  term.reverse ? rune.bg : 15];
 	int baseline = y + font->ascent;
 	int width = len * w.font_width;
 
@@ -321,7 +320,7 @@ static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 		SWAP(fg, bg);
 
 	// Draw the background, then the text, then decorations
-	XftDrawRect(w.draw, &bg, x, y, width, w.font_height);
+	XftDrawRect(w.draw, &bg, x, y, width, w.font[0]->height + 1);
 	XftDrawStringUtf8(w.draw, &fg, font, x, baseline, text, len);
 
 	if (rune.attr & ATTR_UNDERLINE)
@@ -431,6 +430,8 @@ static void on_keypress(XKeyEvent *e)
 		paste(true);
 	else if (keysym == XK_ISO_Left_Tab)
 		dprintf(pty.fd, "%s", "\033[Z");
+	else if (ctrl && keysym == XK_question)
+		dprintf(pty.fd, "%c", 127);
 	else if (keysym == XK_BackSpace)
 		dprintf(pty.fd, "%c", ctrl ? 027 : 0177);
 	else if (BETWEEN(keysym, 0xff50, 0xffff) && codes[keysym - 0xff50])
@@ -553,6 +554,7 @@ static void pty_new(char* cmd[])
 	case -1:
 		die("forkpty failed");
 	case 0:
+		setenv("TERM", "xterm-256color", 1);
 		execvp(cmd[0], cmd);
 		die("exec failed");
 	default:
@@ -797,7 +799,7 @@ static void handle_esc(u8 second_byte)
 	}
 }
 
-static void tputc(u8 u)
+static void pty_putchar(u8 u)
 {
 	static const char* line_drawing = "┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│";
 	static long i;
@@ -870,9 +872,9 @@ static void __attribute__((noreturn)) run(void)
 
 		if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
 			term.scroll = term.lines;
-			tputc(pty_getchar());
+			pty_putchar(pty_getchar());
 			while (pty.c < pty.end)
-				tputc(*pty.c++);
+				pty_putchar(*pty.c++);
 		}
 
 		XEvent e;
@@ -942,6 +944,7 @@ static void load_resources() {
 	w.font_width = w.font[0]->max_advance_width;
 	w.border = atoi(get_resource("borderWidth", "2"));
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
+	term.reverse = is_true(get_resource("reverseVideo", "on"));
 }
 
 int main(int argc, char *argv[])
