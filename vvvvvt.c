@@ -129,6 +129,7 @@ static struct {
 } w;
 
 static XftColor colors[256];
+static char config_file[256];
 
 // Set all characters between lines `first` and `end` (inclusive) to the erased state
 static void erase_lines(int first, int last)
@@ -317,7 +318,11 @@ static const char* get_resource(const char* resource, const char* fallback)
 }
 
 static void load_resources() {
-	XrmDatabase xrm = XrmGetFileDatabase("/home/grimy/config/Xresources");
+	char *xdg_config = getenv("XDG_CONFIG_HOME");
+	strcpy(config_file, xdg_config ? xdg_config : getenv("HOME"));
+	strcat(config_file, "/Xresources");
+
+	XrmDatabase xrm = XrmGetFileDatabase(config_file);
 	XrmSetDatabase(w.disp, xrm);
 
 	// Fonts
@@ -914,13 +919,9 @@ static void __attribute__((noreturn)) run(void)
 	int xfd = XConnectionNumber(w.disp);
 	int ifd = inotify_init();
 	int nfd = MAX(ifd, MAX(xfd, pty.fd)) + 1;
-
-	char fname[256];
-	strcpy(fname, getenv("XDG_CONFIG_HOME"));
-	strcat(fname, "/Xresources");
-	inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
-
 	struct timeval timeout = { 0, 0 };
+
+	inotify_add_watch(ifd, config_file, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
 
 	for (;;) {
 		FD_ZERO(&read_fds);
@@ -941,7 +942,7 @@ static void __attribute__((noreturn)) run(void)
 		if (FD_ISSET(ifd, &read_fds)) {
 			u8 buf[BUFSIZ];
 			read(ifd, buf, BUFSIZ);
-			inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
+			inotify_add_watch(ifd, config_file, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
 			load_resources();
 		}
 
@@ -962,7 +963,7 @@ static void __attribute__((noreturn)) run(void)
 int main(int argc, char *argv[])
 {
 	if (!(w.disp = XOpenDisplay(0))) {
-		fprintf(stderr, "Failed to open display\n");
+		fprintf(stderr, "Failed to open display %s\n", getenv("DISPLAY"));
 		exit(1);
 	}
 	setlocale(LC_CTYPE, "");
