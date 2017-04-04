@@ -140,8 +140,8 @@ static void clear_region(int x1, int y1, int x2, int y2)
 
 	for (int y = y1; y <= y2; y++) {
 		int xstart = y == y1 ? x1 : 0;
-		int xend = y == y2 ? x2 : pty.cols - 1;
-		memset(TLINE(y) + xstart, 0, (xend - xstart + 1) * sizeof(Rune));
+		int xend = y == y2 ? x2 : pty.cols;
+		memset(TLINE(y) + xstart, 0, (xend - xstart) * sizeof(Rune));
 	}
 }
 
@@ -152,7 +152,7 @@ static void move_region(int start, int end, int diff) {
 	int last = end - diff + step;
 	for (int y = start; y != last; y += step)
 		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
-	clear_region(0, MIN(last, end), LINE_SIZE - 1, MAX(last, end));
+	clear_region(0, MIN(last, end), LINE_SIZE, MAX(last, end));
 }
 
 static void move_to(int x, int y)
@@ -209,12 +209,12 @@ static void copy(bool clipboard)
 
 	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
 		Rune *line = SLINE(y);
-		int x1 = y == sel.nb.y ? sel.nb.x : 0;
-		int x2 = y == sel.ne.y ? sel.ne.x : pty.cols;
+		int xstart = y == sel.nb.y ? sel.nb.x : 0;
+		int xend = y == sel.ne.y ? sel.ne.x : pty.cols;
 
-		for (int x = x1; x < x2; ++x)
+		for (int x = xstart; x < xend; ++x)
 			fprintf(pipe, "%.4s", line[x].u);
-		if (x2 == pty.cols)
+		if (xend == pty.cols)
 			fprintf(pipe, "\n");
 	}
 
@@ -515,7 +515,6 @@ static void on_resize(XConfigureEvent *e)
 	// Update X window data
 	w.width = e->width;
 	w.height = e->height;
-	draw();
 
 	// Send our size to the pty driver so that applications can query it
 	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
@@ -674,7 +673,7 @@ static void set_mode(bool set, int mode)
 		if (set ^ term.alt)
 			swap_screen();
 		if (set)
-			clear_region(0, 0, pty.cols - 1, pty.rows - 1);
+			clear_region(0, 0, pty.cols, pty.rows - 1);
 		break;
 	case 1000: // Report mouse buttons
 	case 1003: // Report mouse motion
@@ -720,13 +719,14 @@ next_csi_byte:
 		move_to(cursor.x + MAX(*arg, 1), cursor.y);
 		break;
 	case 'D': // CUB — Cursor <n> backward
+		LIMIT(cursor.x, 0, pty.cols - 1);
 		move_to(cursor.x - MAX(*arg, 1), cursor.y);
 		break;
 	case 'E': // CNL — Cursor <n> down and first col
 		move_to(0, cursor.y + MAX(*arg, 1));
 		break;
 	case 'F': // CPL — Cursor <n> up and first col
-		move_to(0, cursor.y + MAX(*arg, 1));
+		move_to(0, cursor.y - MAX(*arg, 1));
 		break;
 	case 'G': // CHA — Move to <col>
 	case '`': // HPA — Move to <col>
@@ -740,12 +740,13 @@ next_csi_byte:
 		move_to(((cursor.x >> 3) + MAX(*arg, 1)) << 3, cursor.y);
 		break;
 	case 'J': // ED — Erase display
+		clear_region(0, *arg ? 0 : cursor.y + 1, pty.cols, (*arg == 1 ? cursor.y : pty.rows) - 1);
+		// FALLTHROUGH
 	case 'K': // EL — Erase line
-		clear_region(
-			*arg ? 0 : cursor.x,
-			*arg && command == 'J' ? 0 : cursor.y,
-			*arg == 1 ? cursor.x : pty.cols - 1,
-			*arg == 1 || command == 'K' ? cursor.y : pty.rows - 1);
+		cursor.rune.u[0] = ' ';
+		Rune *line = TLINE(cursor.y);
+		for (int x = *arg ? 0 : cursor.x; x < (*arg == 1 ? cursor.x : pty.cols); ++x)
+			line[x] = cursor.rune;
 		break;
 	case 'L': // IL — Insert <n> blank lines
 	case 'M': // DL — Delete <n> lines
@@ -774,15 +775,12 @@ next_csi_byte:
 		break;
 	case 'X': // ECH — Erase <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
-		clear_region(cursor.x, cursor.y, cursor.x + *arg - 1, cursor.y);
+		clear_region(cursor.x, cursor.y, cursor.x + *arg, cursor.y);
 		memset(TLINE(cursor.y) + cursor.x, 0, *arg * sizeof(Rune));
 		break;
 	case 'Z': // CBT — Cursor backward <n> tabulation stops
 		move_to(((cursor.x >> 3) - MAX(*arg, 1)) << 3, cursor.y);
 		break;
-	case 'b': // REP — Repeat last graphic character <n> times
-		for (int i = 0; i < MAX(*arg, 1); ++i) {
-		}
 	case 'c': // DA — Device Attributes
 		if (*arg == 0)
 			dprintf(pty.fd, "%s", "\033[?64;15;22c");
@@ -859,9 +857,7 @@ static void handle_esc(u8 second_byte)
 		handle_csi();
 		break;
 	case ']': // OSC — Operating System Command
-		for (u8 c = 0; c != '\a'; c = pty_getchar())
-			if (c == '\033' && pty_getchar())
-				break;
+		for (u8 c = 0; c != '\a' && (c != '\033' || pty_getchar() != '\\'); c = pty_getchar());
 		break;
 	case 'c': // RIS — Reset to inital state
 		memset(&term, 0, sizeof(term));
@@ -897,7 +893,8 @@ invalid_utf8:
 	case '\033': // ESC
 		handle_esc(pty_getchar());
 		return;
-	case ' ' ... 255:
+	case ' ' ... '~':
+	case 128 ... 255:
 		if (cursor.x == pty.cols) {
 			newline();
 			cursor.x = 0;
@@ -933,7 +930,7 @@ static void __attribute__((noreturn)) run(void)
 	inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
 
 	const struct timespec timeout = { 0, 20000000 }; // 20ms
-	int dirty = 1;
+	int dirty = 0;
 
 	for (;;) {
 		FD_ZERO(&read_fds);
@@ -944,9 +941,9 @@ static void __attribute__((noreturn)) run(void)
 		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
 		if (result < 0)
 			die("select failed");
-		dirty += result;
 
 		if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
+			++dirty;
 			term.scroll = term.lines;
 			pty_putchar(pty_getchar());
 			while (pty.c < pty.end)
@@ -954,6 +951,7 @@ static void __attribute__((noreturn)) run(void)
 		}
 
 		if (FD_ISSET(ifd, &read_fds)) {
+			dirty += 257;
 			u8 buf[BUFSIZ];
 			read(ifd, buf, BUFSIZ);
 			inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
@@ -962,13 +960,14 @@ static void __attribute__((noreturn)) run(void)
 
 		XEvent e;
 		while (XPending(w.disp)) {
+			dirty += 255;
 			XNextEvent(w.disp, &e);
 			handle_xevent(&e);
 		}
 
-		if (dirty > 256 || (dirty && w.visible && !result)) {
+		if (dirty >= 257 || (dirty && w.visible && !result)) {
 			draw();
-			dirty = false;
+			dirty = 0;
 		}
 	}
 }
