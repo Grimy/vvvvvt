@@ -9,7 +9,6 @@
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <assert.h>
-#include <errno.h>
 #include <locale.h>
 #include <pty.h>
 #include <signal.h>
@@ -43,7 +42,7 @@
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
 #define clear_selection()   (sel.ne.y = -1)
-#define die(message)        exit(fprintf(stderr, message ": %s\n", errno ? strerror(errno) : ""))
+#define die(message)        do { perror(message); clean_exit(w.disp); } while (0)
 
 typedef enum { false, true } bool;
 typedef uint8_t u8;
@@ -126,8 +125,7 @@ static struct {
 	int width, height;
 	int font_height, font_width;
 	int border;
-	bool visible: 16;
-	bool focused: 16;
+	bool focused;
 } w;
 
 static XftColor colors[256];
@@ -273,8 +271,8 @@ static void create_window(void)
 	// Events
 	XSetIOErrorHandler(clean_exit);
 	XSetWindowAttributes attrs;
-	attrs.event_mask = FocusChangeMask | VisibilityChangeMask | StructureNotifyMask;
-	attrs.event_mask |= KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
+	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask;
+	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 
 	// Create and map the window
 	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
@@ -285,7 +283,7 @@ static void create_window(void)
 
 	XChangeWindowAttributes(w.disp, win, CWEventMask, &attrs);
 	XStoreName(w.disp, win, "vvvvvt");
-	// XDefineCursor(w.disp, win, XCreateFontCursor(w.disp, XC_xterm));
+	XDefineCursor(w.disp, win, XCreateFontCursor(w.disp, XC_xterm));
 	XMapWindow(w.disp, win);
 }
 
@@ -519,7 +517,7 @@ static void on_resize(XConfigureEvent *e)
 	// Send our size to the pty driver so that applications can query it
 	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
 	if (ioctl(pty.fd, TIOCSWINSZ, &size) < 0)
-		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
+		perror("Couldn't set window size");
 }
 
 static void on_mouse(XButtonEvent *e)
@@ -581,9 +579,6 @@ static void handle_xevent(XEvent * e)
 		break;
 	case ConfigureNotify:
 		on_resize((XConfigureEvent*) e);
-		break;
-	case VisibilityNotify:
-		w.visible = ((XVisibilityEvent*) e)->state != VisibilityFullyObscured;
 		break;
 	case FocusIn:
 	case FocusOut:
@@ -925,8 +920,7 @@ static void __attribute__((noreturn)) run(void)
 	strcat(fname, "/Xresources");
 	inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
 
-	const struct timespec timeout = { 0, 20000000 }; // 20ms
-	int dirty = 0;
+	struct timeval timeout = { 0, 0 };
 
 	for (;;) {
 		FD_ZERO(&read_fds);
@@ -934,12 +928,10 @@ static void __attribute__((noreturn)) run(void)
 		FD_SET(ifd, &read_fds);
 		FD_SET(xfd, &read_fds);
 
-		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
-		if (result < 0)
+		if (select(nfd, &read_fds, 0, 0, &timeout) < 0)
 			die("select failed");
 
 		if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
-			++dirty;
 			term.scroll = term.lines;
 			pty_putchar(pty_getchar());
 			while (pty.c < pty.end)
@@ -947,7 +939,6 @@ static void __attribute__((noreturn)) run(void)
 		}
 
 		if (FD_ISSET(ifd, &read_fds)) {
-			dirty += 257;
 			u8 buf[BUFSIZ];
 			read(ifd, buf, BUFSIZ);
 			inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
@@ -956,26 +947,28 @@ static void __attribute__((noreturn)) run(void)
 
 		XEvent e;
 		while (XPending(w.disp)) {
-			dirty += 255;
 			XNextEvent(w.disp, &e);
 			handle_xevent(&e);
 		}
 
-		if (dirty >= 257 || (dirty && w.visible && !result)) {
+		timeout.tv_usec = MIN(timeout.tv_usec - 50, 20000);
+		if (timeout.tv_usec <= 0) {
 			draw();
-			dirty = 0;
+			timeout.tv_usec = 999999;
 		}
 	}
 }
 
 int main(int argc, char *argv[])
 {
-	if (!(w.disp = XOpenDisplay(0)))
-		die("Failed to open display");
+	if (!(w.disp = XOpenDisplay(0))) {
+		fprintf(stderr, "Failed to open display\n");
+		exit(1);
+	}
 	setlocale(LC_CTYPE, "");
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
+	XCreateFontCursor(w.disp, XC_xterm);
 
-	XrmInitialize();
 	load_resources();
 	create_window();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
