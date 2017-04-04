@@ -1,0 +1,2 @@
+XTerm has weird behavior here, so we imitate urxvt instead.
+	123[3I1234567	12345678	123[99II[ZZ[3ZZ[99ZZ
