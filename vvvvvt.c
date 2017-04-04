@@ -131,28 +131,31 @@ static struct {
 } w;
 
 static XftColor colors[256];
-static XrmDatabase xrm;
 
-static void clear_region(int x1, int y1, int x2, int y2)
+// Set all characters between lines `first` and `end` (inclusive) to the erased state
+static void erase_lines(int first, int last)
 {
-	if (sel.nb.y <= y2 && sel.ne.y >= y1)
+	if (sel.nb.y <= last && sel.ne.y >= first)
 		clear_selection();
-
-	for (int y = y1; y <= y2; y++) {
-		int xstart = y == y1 ? x1 : 0;
-		int xend = y == y2 ? x2 : pty.cols;
-		memset(TLINE(y) + xstart, 0, (xend - xstart) * sizeof(Rune));
-	}
+	for (int y = first; y <= last; y++)
+		memset(TLINE(y), 0, sizeof(TLINE(y)));
 }
 
-static void move_region(int start, int end, int diff) {
+static void erase_chars(int first, int last)
+{
+	Rune *line = TLINE(cursor.y);
+	for (int x = first; x <= last; ++x)
+		line[x] = (Rune) { "", 0, 0, cursor.rune.bg };
+}
+
+static void move_lines(int start, int end, int diff) {
 	int step = diff < 0 ? -1 : 1;
 	if (diff < 0)
 		SWAP(start, end);
 	int last = end - diff + step;
 	for (int y = start; y != last; y += step)
 		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
-	clear_region(0, MIN(last, end), LINE_SIZE, MAX(last, end));
+	erase_lines(MIN(last, end), MAX(last, end));
 }
 
 static void move_to(int x, int y)
@@ -176,11 +179,11 @@ static void newline()
 	if (cursor.y != term.bot) {
 		move_to(cursor.x, cursor.y + 1);
 	} else if (term.top || term.alt) {
-		move_region(term.top, term.bot, 1);
+		move_lines(term.top, term.bot, 1);
 	} else {
 		++term.lines;
 		++term.scroll;
-		move_region(term.bot, pty.rows - 1, -1);
+		move_lines(term.bot, pty.rows - 1, -1);
 	}
 }
 
@@ -282,7 +285,7 @@ static void create_window(void)
 
 	XChangeWindowAttributes(w.disp, win, CWEventMask, &attrs);
 	XStoreName(w.disp, win, "vvvvvt");
-	XDefineCursor(w.disp, win, XCreateFontCursor(w.disp, XC_xterm));
+	// XDefineCursor(w.disp, win, XCreateFontCursor(w.disp, XC_xterm));
 	XMapWindow(w.disp, win);
 }
 
@@ -311,16 +314,13 @@ static bool is_true(const char* word)
 
 static const char* get_resource(const char* resource, const char* fallback)
 {
-	char *type;
-	XrmValue result;
-	char name[32] = "vvvvvt.";
-	strcat(name, resource);
-	XrmGetResource(xrm, name, name, &type, &result);
-	return result.addr ? result.addr : fallback;
+	char* result = XGetDefault(w.disp, "vvvvvt", resource);
+	return result ? result : fallback;
 }
 
 static void load_resources() {
-	xrm = XrmGetFileDatabase("/home/grimy/config/Xresources");
+	XrmDatabase xrm = XrmGetFileDatabase("/home/grimy/config/Xresources");
+	XrmSetDatabase(w.disp, xrm);
 
 	// Fonts
 	const char *face_name = get_resource("faceName", "mono");
@@ -673,7 +673,7 @@ static void set_mode(bool set, int mode)
 		if (set ^ term.alt)
 			swap_screen();
 		if (set)
-			clear_region(0, 0, pty.cols, pty.rows - 1);
+			erase_lines(0, pty.rows - 1);
 		break;
 	case 1000: // Report mouse buttons
 	case 1003: // Report mouse motion
@@ -740,19 +740,16 @@ next_csi_byte:
 		move_to(((cursor.x >> 3) + MAX(*arg, 1)) << 3, cursor.y);
 		break;
 	case 'J': // ED — Erase display
-		clear_region(0, *arg ? 0 : cursor.y + 1, pty.cols, (*arg == 1 ? cursor.y : pty.rows) - 1);
+		erase_lines(*arg ? 0 : cursor.y + 1, (*arg == 1 ? cursor.y : pty.rows) - 1);
 		// FALLTHROUGH
 	case 'K': // EL — Erase line
-		cursor.rune.u[0] = ' ';
-		Rune *line = TLINE(cursor.y);
-		for (int x = *arg ? 0 : cursor.x; x < (*arg == 1 ? cursor.x : pty.cols); ++x)
-			line[x] = cursor.rune;
+		erase_chars(*arg ? 0 : cursor.x, *arg == 1 ? cursor.x : pty.cols);
 		break;
 	case 'L': // IL — Insert <n> blank lines
 	case 'M': // DL — Delete <n> lines
 		if (BETWEEN(cursor.y, term.top, term.bot)) {
 			LIMIT(*arg, 1, term.bot - cursor.y + 1);
-			move_region(cursor.y, term.bot, command == 'L' ? -*arg : *arg);
+			move_lines(cursor.y, term.bot, command == 'L' ? -*arg : *arg);
 			cursor.x = 0;
 		}
 		break;
@@ -760,23 +757,22 @@ next_csi_byte:
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		Rune *dest = TLINE(cursor.y) + cursor.x;
 		memmove(dest, dest + *arg, (pty.cols - cursor.x - *arg) * sizeof(Rune));
-		memset(TLINE(cursor.y) + pty.cols - *arg, 0, *arg * sizeof(Rune));
+		erase_chars(pty.cols - *arg, pty.cols - 1);
 		break;
 	case '@': // ICH — Insert <n> blank chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		Rune *src = TLINE(cursor.y) + cursor.x;
 		memmove(src + *arg, src, (pty.cols - cursor.x - *arg) * sizeof(Rune));
-		memset(src, 0, *arg * sizeof(Rune));
+		erase_chars(cursor.x, cursor.x + *arg - 1);
 		break;
 	case 'S': // SU — Scroll <n> lines up
 	case 'T': // SD — Scroll <n> lines down
 		LIMIT(*arg, 1, term.bot - term.top + 1);
-		move_region(term.top, term.bot, command == 'T' ? -*arg : *arg);
+		move_lines(term.top, term.bot, command == 'T' ? -*arg : *arg);
 		break;
 	case 'X': // ECH — Erase <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
-		clear_region(cursor.x, cursor.y, cursor.x + *arg, cursor.y);
-		memset(TLINE(cursor.y) + cursor.x, 0, *arg * sizeof(Rune));
+		erase_chars(cursor.x, cursor.x + *arg - 1);
 		break;
 	case 'Z': // CBT — Cursor backward <n> tabulation stops
 		move_to(((cursor.x >> 3) - MAX(*arg, 1)) << 3, cursor.y);
@@ -849,7 +845,7 @@ static void handle_esc(u8 second_byte)
 		break;
 	case 'M': // RI — Reverse index
 		if (cursor.y <= term.top)
-			move_region(term.top, term.bot, -1);
+			move_lines(term.top, term.bot, -1);
 		else
 			--cursor.y;
 		break;
