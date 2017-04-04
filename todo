@@ -1,2 +1,3 @@
-* test under non-tiling WMs !!!
+* better resizing behavior
 * handle saveLines
+* test all clear_region(?, ?, pty.cols - 1, ?)

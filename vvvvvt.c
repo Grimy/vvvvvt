@@ -114,7 +114,7 @@ static struct {
 	u8 charset[4];
 	bool report_buttons, report_motion, report_focus;
 	bool alt, hide, appcursor, line_drawing;
-	bool meta_sends_escape, reverse;
+	bool meta_sends_escape, reverse_video;
 } term;
 
 // Drawing Context
@@ -153,16 +153,6 @@ static void move_region(int start, int end, int diff) {
 	for (int y = start; y != last; y += step)
 		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
 	clear_region(0, MIN(last, end), LINE_SIZE - 1, MAX(last, end));
-}
-
-static void move_chars(bool forward, int diff) {
-	int dst = cursor.x + (forward ? diff : 0);
-	int src = cursor.x + (forward ? 0 : diff);
-	int size = pty.cols - (cursor.x + diff);
-	int del = (forward ? cursor.x : pty.cols - diff);
-	Rune *line = TLINE(cursor.y);
-	memmove(line + dst, line + src, size * sizeof(Rune));
-	clear_region(del, cursor.y, del + diff - 1, cursor.y);
 }
 
 static void move_to(int x, int y)
@@ -271,16 +261,12 @@ static int __attribute__((noreturn)) clean_exit(Display *disp)
 {
 	for (int i = 0; i < 4; ++i)
 		XftFontClose(disp, w.font[i]);
-	XrmDestroyDatabase(xrm);
 	XCloseDisplay(disp);
 	exit(0);
 }
 
 static void create_window(void)
 {
-	if (!(w.disp = XOpenDisplay(0)))
-		die("Failed to open display");
-
 	// Events
 	XSetIOErrorHandler(clean_exit);
 	XSetWindowAttributes attrs;
@@ -289,7 +275,9 @@ static void create_window(void)
 
 	// Create and map the window
 	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
-	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, 1, 1, 0, CopyFromParent, CopyFromParent);
+	int width = 80 * w.font_width + 2 * w.border;
+	int height = 24 * w.font_height + 2 * w.border;
+	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, CopyFromParent, CopyFromParent);
 	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), CopyFromParent);
 
 	XChangeWindowAttributes(w.disp, win, CWEventMask, &attrs);
@@ -332,8 +320,6 @@ static const char* get_resource(const char* resource, const char* fallback)
 }
 
 static void load_resources() {
-	if (xrm)
-		XrmDestroyDatabase(xrm);
 	xrm = XrmGetFileDatabase("/home/grimy/config/Xresources");
 
 	// Fonts
@@ -365,7 +351,9 @@ static void load_resources() {
 	w.font_width = w.font[0]->max_advance_width;
 	w.border = atoi(get_resource("borderWidth", "2"));
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
-	term.reverse = is_true(get_resource("reverseVideo", "on"));
+	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
+
+	XrmDestroyDatabase(xrm);
 }
 
 static void draw_text(Rune rune, u8 *text, int len, int x, int y)
@@ -373,8 +361,8 @@ static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 	bool bold = (rune.attr & ATTR_BOLD) != 0;
 	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = w.font[bold + 2 * italic];
-	XftColor fg = colors[rune.fg || !term.reverse ? rune.fg : 15];
-	XftColor bg = colors[rune.bg ||  term.reverse ? rune.bg : 15];
+	XftColor fg = colors[rune.fg || !term.reverse_video ? rune.fg : 15];
+	XftColor bg = colors[rune.bg ||  term.reverse_video ? rune.bg : 15];
 	int baseline = y + font->ascent;
 	int width = len * w.font_width;
 
@@ -457,9 +445,11 @@ static void draw(void)
 
 static void special_key(u8 c, int state)
 {
-	if (state)
-		dprintf(pty.fd, "\033[%d;%d%c", c < '@' ? c : 1, state + 1, c < '@' ? '~' : c);
-	else if (c < '@')
+	if (state && c < 'A')
+		dprintf(pty.fd, "\033[%d;%d~", c, state + 1);
+	else if (state)
+		dprintf(pty.fd, "\033[1;%d%c", state + 1, c);
+	else if (c < 'A')
 		dprintf(pty.fd, "\033[%d~", c);
 	else
 		dprintf(pty.fd, "\033%c%c", term.appcursor ? 'O' : '[', c);
@@ -525,6 +515,7 @@ static void on_resize(XConfigureEvent *e)
 	// Update X window data
 	w.width = e->width;
 	w.height = e->height;
+	draw();
 
 	// Send our size to the pty driver so that applications can query it
 	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
@@ -669,16 +660,17 @@ static int set_attr(int *attr)
 static void set_mode(bool set, int mode)
 {
 	switch (mode) {
-	case 1:    // Application cursor keys
+	case 1:    // DECCKM — Application cursor keys
 		term.appcursor = set;
 		break;
-	case 25:   // Show cursor
+	case 5:    // DECSCNM — Reverse video
+		term.reverse_video = set;
+		break;
+	case 25:   // DECTCEM — Show cursor
 		term.hide = !set;
 		break;
 	case 47:
-	case 1047:
-	case 1048:
-	case 1049: // Swap screen & set/restore cursor
+	case 1049: // Alternate screen buffer
 		if (set ^ term.alt)
 			swap_screen();
 		if (set)
@@ -692,7 +684,7 @@ static void set_mode(bool set, int mode)
 	case 1004: // Report focus events
 		term.report_focus = set;
 		break;
-	case 1036: // DECSET -- meta sends escape
+	case 1036: // Send ESC when Meta modifies a key
 		term.meta_sends_escape = set;
 		break;
 	}
@@ -704,110 +696,121 @@ static void handle_csi()
 	u32 nargs = 0;
 	char command = 0;
 
-	csi:
+next_csi_byte:
 	switch (command = pty_getchar()) {
 	case '0' ... '9':
 		if (arg[nargs] < 10000)
 			arg[nargs] = 10 * arg[nargs] + command - '0';
-		goto csi;
+		goto next_csi_byte;
 	case ';':
 		nargs = MIN(nargs + 1, LEN(arg) - 1);
-		goto csi;
+		goto next_csi_byte;
 	case ' ' ... '/': // Intermediate bytes
 	case '<' ... '?': // Private parameter bytes
-		goto csi;
-	case 'A': // CUU -- Cursor <n> Up
+		goto next_csi_byte;
+	case 'A': // CUU — Cursor <n> up
 		move_to(cursor.x, cursor.y - MAX(*arg, 1));
 		break;
-	case 'B': // CUD -- Cursor <n> Down
-	case 'e': // VPR -- Cursor <n> Down
+	case 'B': // CUD — Cursor <n> down
+	case 'e': // VPR — Cursor <n> down
 		move_to(cursor.x, cursor.y + MAX(*arg, 1));
 		break;
-	case 'C': // CUF -- Cursor <n> Forward
-	case 'a': // HPR -- Cursor <n> Forward
+	case 'C': // CUF — Cursor <n> forward
+	case 'a': // HPR — Cursor <n> forward
 		move_to(cursor.x + MAX(*arg, 1), cursor.y);
 		break;
-	case 'D': // CUB -- Cursor <n> Backward
+	case 'D': // CUB — Cursor <n> backward
 		move_to(cursor.x - MAX(*arg, 1), cursor.y);
 		break;
-	case 'E': // CNL -- Cursor <n> Down and first col
+	case 'E': // CNL — Cursor <n> down and first col
 		move_to(0, cursor.y + MAX(*arg, 1));
 		break;
-	case 'F': // CPL -- Cursor <n> Up and first col
+	case 'F': // CPL — Cursor <n> up and first col
 		move_to(0, cursor.y + MAX(*arg, 1));
 		break;
-	case 'G': // CHA -- Move to <col>
-	case '`': // HPA -- Move to <col>
+	case 'G': // CHA — Move to <col>
+	case '`': // HPA — Move to <col>
 		move_to(*arg - 1, cursor.y);
 		break;
-	case 'H': // CUP -- Move to <row> <col>
-	case 'f': // HVP -- Move to <row> <col>
+	case 'H': // CUP — Move to <row> <col>
+	case 'f': // HVP — Move to <row> <col>
 		move_to(arg[1] - 1, arg[0] - 1);
 		break;
-	case 'I': // CHT -- Cursor forward <n> tabulation stops
+	case 'I': // CHT — Cursor forward <n> tabulation stops
 		move_to(((cursor.x >> 3) + MAX(*arg, 1)) << 3, cursor.y);
 		break;
-	case 'J': // ED -- Clear screen
-	case 'K': // EL -- Clear line
+	case 'J': // ED — Erase display
+	case 'K': // EL — Erase line
 		clear_region(
 			*arg ? 0 : cursor.x,
 			*arg && command == 'J' ? 0 : cursor.y,
 			*arg == 1 ? cursor.x : pty.cols - 1,
 			*arg == 1 || command == 'K' ? cursor.y : pty.rows - 1);
 		break;
-	case 'L': // IL -- Insert <n> blank lines
-	case 'M': // DL -- Delete <n> lines
+	case 'L': // IL — Insert <n> blank lines
+	case 'M': // DL — Delete <n> lines
 		if (BETWEEN(cursor.y, term.top, term.bot)) {
 			LIMIT(*arg, 1, term.bot - cursor.y + 1);
 			move_region(cursor.y, term.bot, command == 'L' ? -*arg : *arg);
 			cursor.x = 0;
 		}
 		break;
-	case 'P': // DCH -- Delete <n> char
-	case '@': // ICH -- Insert <n> blank char
+	case 'P': // DCH — Delete <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
-		move_chars(command == '@', *arg);
+		Rune *dest = TLINE(cursor.y) + cursor.x;
+		memmove(dest, dest + *arg, (pty.cols - cursor.x - *arg) * sizeof(Rune));
+		memset(TLINE(cursor.y) + pty.cols - *arg, 0, *arg * sizeof(Rune));
 		break;
-	case 'S': // SU -- Scroll <n> line up
-	case 'T': // SD -- Scroll <n> line down
+	case '@': // ICH — Insert <n> blank chars
+		LIMIT(*arg, 1, pty.cols - cursor.x);
+		Rune *src = TLINE(cursor.y) + cursor.x;
+		memmove(src + *arg, src, (pty.cols - cursor.x - *arg) * sizeof(Rune));
+		memset(src, 0, *arg * sizeof(Rune));
+		break;
+	case 'S': // SU — Scroll <n> lines up
+	case 'T': // SD — Scroll <n> lines down
 		LIMIT(*arg, 1, term.bot - term.top + 1);
 		move_region(term.top, term.bot, command == 'T' ? -*arg : *arg);
 		break;
-	case 'X': // ECH -- Erase <n> char
+	case 'X': // ECH — Erase <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		clear_region(cursor.x, cursor.y, cursor.x + *arg - 1, cursor.y);
+		memset(TLINE(cursor.y) + cursor.x, 0, *arg * sizeof(Rune));
 		break;
-	case 'Z': // CBT -- Cursor backward <n> tabulation stops
+	case 'Z': // CBT — Cursor backward <n> tabulation stops
 		move_to(((cursor.x >> 3) - MAX(*arg, 1)) << 3, cursor.y);
 		break;
-	case 'c': // DA -- Device Attributes
+	case 'b': // REP — Repeat last graphic character <n> times
+		for (int i = 0; i < MAX(*arg, 1); ++i) {
+		}
+	case 'c': // DA — Device Attributes
 		if (*arg == 0)
 			dprintf(pty.fd, "%s", "\033[?64;15;22c");
 		break;
-	case 'd': // VPA -- Move to <row>
+	case 'd': // VPA — Move to <row>
 		move_to(cursor.x, *arg - 1);
 		break;
-	case 'h': // SM -- Set Mode
-	case 'l': // RM -- Reset Mode
+	case 'h': // SM — Set Mode
+	case 'l': // RM — Reset Mode
 		for (u32 i = 0; i <= nargs; ++i)
 			set_mode(command == 'h', arg[i]);
 		break;
-	case 'm': // SGR -- Select Graphic Rendition
+	case 'm': // SGR — Select Graphic Rendition
 		for (u32 i = 0; i <= nargs; i += set_attr(arg + i));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 6)
 			dprintf(pty.fd, "\033[%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
-	case 'p': // DECSTR -- Soft terminal reset
+	case 'p': // DECSTR — Soft terminal reset
 		memset(&term.top, 0, sizeof(term) - ((char*) &term.top - (char*) &term));
 		term.bot = pty.rows - 1;
 		break;
-	case 'q': // DECSCUSR -- Set Cursor Style
+	case 'q': // DECSCUSR — Set Cursor Style
 		if (*arg <= 6)
 			term.cursor_style = *arg;
 		break;
-	case 'r': // DECSTBM -- Set Scrolling Region
+	case 'r': // DECSTBM — Set Scrolling Region
 		arg[0] = arg[0] ? arg[0] : 1;
 		arg[1] = arg[1] && arg[1] < pty.rows ? arg[1] : pty.rows;
 		if (arg[0] < arg[1]) {
@@ -816,10 +819,10 @@ static void handle_csi()
 			move_to(0, 0);
 		}
 		break;
-	case 's': // DECSC -- Save cursor position
+	case 's': // DECSC — Save cursor position
 		saved_cursors[term.alt] = cursor;
 		break;
-	case 'u': // DECRC -- Restore cursor position
+	case 'u': // DECRC — Restore cursor position
 		cursor = saved_cursors[term.alt];
 		break;
 	}
@@ -836,31 +839,31 @@ static void handle_esc(u8 second_byte)
 	case '(' ... '+':
 		term.charset[second_byte - '('] = final_byte;
 		break;
-	case '7': // DECSC -- Save Cursor
+	case '7': // DECSC — Save Cursor
 		saved_cursors[term.alt] = cursor;
 		break;
-	case '8': // DECRC -- Restore Cursor
+	case '8': // DECRC — Restore Cursor
 		cursor = saved_cursors[term.alt];
 		break;
-	case 'E': // NEL -- Next line
+	case 'E': // NEL — Next line
 		newline();
 		cursor.x = 0;
 		break;
-	case 'M': // RI -- Reverse index
+	case 'M': // RI — Reverse index
 		if (cursor.y <= term.top)
 			move_region(term.top, term.bot, -1);
 		else
 			--cursor.y;
 		break;
-	case '[': // CSI -- Control Sequence Introducer
+	case '[': // CSI — Control Sequence Introducer
 		handle_csi();
 		break;
-	case ']': // OSC -- Operating System Command
+	case ']': // OSC — Operating System Command
 		for (u8 c = 0; c != '\a'; c = pty_getchar())
 			if (c == '\033' && pty_getchar())
 				break;
 		break;
-	case 'c': // RIS -- Reset to inital state
+	case 'c': // RIS — Reset to inital state
 		memset(&term, 0, sizeof(term));
 		term.bot = pty.rows - 1;
 		break;
@@ -887,8 +890,8 @@ invalid_utf8:
 	case '\r':
 		cursor.x = 0;
 		return;
-	case '\016': // LS1 -- Locking shift 1
-	case '\017': // LS0 -- Locking shift 0
+	case '\016': // LS1 — Locking shift 1
+	case '\017': // LS0 — Locking shift 0
 		term.line_drawing = term.charset[u == '\016'] == '0';
 		return;
 	case '\033': // ESC
@@ -920,7 +923,6 @@ invalid_utf8:
 static void __attribute__((noreturn)) run(void)
 {
 	fd_set read_fds;
-
 	int xfd = XConnectionNumber(w.disp);
 	int ifd = inotify_init();
 	int nfd = MAX(ifd, MAX(xfd, pty.fd)) + 1;
@@ -931,8 +933,7 @@ static void __attribute__((noreturn)) run(void)
 	inotify_add_watch(ifd, fname, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
 
 	const struct timespec timeout = { 0, 20000000 }; // 20ms
-	struct timespec now, last = { 0, 0 };
-	bool dirty = true;
+	int dirty = 1;
 
 	for (;;) {
 		FD_ZERO(&read_fds);
@@ -943,7 +944,7 @@ static void __attribute__((noreturn)) run(void)
 		int result = pselect(nfd, &read_fds, 0, 0, &timeout, 0);
 		if (result < 0)
 			die("select failed");
-		dirty |= result > 0;
+		dirty += result;
 
 		if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
 			term.scroll = term.lines;
@@ -965,23 +966,23 @@ static void __attribute__((noreturn)) run(void)
 			handle_xevent(&e);
 		}
 
-		clock_gettime(CLOCK_MONOTONIC, &now);
-
-		if (now.tv_sec > last.tv_sec || (dirty && w.visible && now.tv_nsec > last.tv_nsec + 20000000)) {
+		if (dirty > 256 || (dirty && w.visible && !result)) {
 			draw();
 			dirty = false;
-			last = now;
 		}
 	}
 }
 
 int main(int argc, char *argv[])
 {
+	if (!(w.disp = XOpenDisplay(0)))
+		die("Failed to open display");
 	setlocale(LC_CTYPE, "");
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
+
 	XrmInitialize();
-	create_window();
 	load_resources();
+	create_window();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 	run();
 }
