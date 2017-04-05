@@ -1,5 +1,3 @@
-* better resizing behavior
 * handle saveLines
 * defaultfg/defaultbg confusion (htop)
 * fuzz some more
-* fix the cursor shape

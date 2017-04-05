@@ -8,7 +8,6 @@
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
-#include <assert.h>
 #include <locale.h>
 #include <pty.h>
 #include <signal.h>
@@ -267,30 +266,6 @@ static int __attribute__((noreturn)) clean_exit(Display *disp)
 	exit(0);
 }
 
-static void create_window(void)
-{
-	// Events
-	XSetIOErrorHandler(clean_exit);
-
-	// Create and map the window
-	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
-	int width = 80 * w.font_width + 2 * w.border;
-	int height = 24 * w.font_height + 2 * w.border;
-	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, None, None);
-	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), CopyFromParent);
-
-	// Window attributes
-	XSetWindowAttributes attrs;
-	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask;
-	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
-	attrs.bit_gravity = NorthWestGravity;
-	attrs.cursor = XCreateFontCursor(w.disp, XC_xterm);
-	XChangeWindowAttributes(w.disp, win, CWEventMask | CWBitGravity | CWCursor, &attrs);
-
-	XStoreName(w.disp, win, "vvvvvt");
-	XMapWindow(w.disp, win);
-}
-
 static u16 default_color(u16 i, int rgb)
 {
 	u16 theme[] = {
@@ -360,6 +335,34 @@ static void load_resources() {
 	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
 
 	XrmDestroyDatabase(xrm);
+}
+
+static void x_init(void)
+{
+	if (!(w.disp = XOpenDisplay(0))) {
+		fprintf(stderr, "Failed to open display %s\n", getenv("DISPLAY"));
+		exit(1);
+	}
+
+	XSetWindowAttributes attrs;
+	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask | VisibilityChangeMask;
+	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
+	attrs.bit_gravity = NorthWestGravity;
+	attrs.cursor = XCreateFontCursor(w.disp, XC_xterm);
+
+	XSetLocaleModifiers("");        // Xlib leaks memory if we don’t call this
+	load_resources();
+	XSetIOErrorHandler(clean_exit);
+
+	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
+	int width = 80 * w.font_width + 2 * w.border;
+	int height = 24 * w.font_height + 2 * w.border;
+	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, None, None);
+	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
+
+	XChangeWindowAttributes(w.disp, win, CWEventMask | CWBitGravity | CWCursor, &attrs);
+	XStoreName(w.disp, win, "vvvvvt");
+	XMapWindow(w.disp, win);
 }
 
 static void draw_text(Rune rune, u8 *text, int len, int x, int y)
@@ -965,16 +968,7 @@ static void __attribute__((noreturn)) run(void)
 
 int main(int argc, char *argv[])
 {
-	if (!(w.disp = XOpenDisplay(0))) {
-		fprintf(stderr, "Failed to open display %s\n", getenv("DISPLAY"));
-		exit(1);
-	}
-	setlocale(LC_CTYPE, "");
-	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
-	XCreateFontCursor(w.disp, XC_xterm);
-
-	load_resources();
-	create_window();
+	x_init();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 	run();
 }
