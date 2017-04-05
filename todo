@@ -1,3 +1,5 @@
 * handle saveLines
 * defaultfg/defaultbg confusion (htop)
 * fuzz some more
+* bracketed paste?
+* more tests

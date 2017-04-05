@@ -344,13 +344,15 @@ static void x_init(void)
 		exit(1);
 	}
 
+	setlocale(LC_CTYPE, ""); // required to parse keypresses correctly
+	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
+
 	XSetWindowAttributes attrs;
 	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask | VisibilityChangeMask;
 	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 	attrs.bit_gravity = NorthWestGravity;
 	attrs.cursor = XCreateFontCursor(w.disp, XC_xterm);
 
-	XSetLocaleModifiers("");        // Xlib leaks memory if we don’t call this
 	load_resources();
 	XSetIOErrorHandler(clean_exit);
 
