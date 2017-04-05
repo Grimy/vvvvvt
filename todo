@@ -1,5 +1,8 @@
 * handle saveLines
-* defaultfg/defaultbg confusion (htop)
 * fuzz some more
 * bracketed paste?
 * more tests
+* consider cairo
+* consider using mtime instead of inotify
+* set colors 232 — 255 as gradient from 0 → 15?
+* add bg/fg colors separate from 0 and 15?

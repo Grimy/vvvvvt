@@ -416,12 +416,10 @@ static void draw_rune(int x, int y)
 	if (selected(x, y + term.scroll))
 		rune.attr ^= ATTR_REVERSE;
 
-	int cursor_attr = term.hide || term.scroll != term.lines ? 0 :
-		w.focused && term.cursor_style < 3 ? ATTR_REVERSE :
-		term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
-
-	if (x == cursor.x && y == cursor.y)
-		rune.attr ^= cursor_attr;
+	if (!term.hide && term.scroll == term.lines && x == cursor.x && y == cursor.y) {
+		rune.attr ^= w.focused && term.cursor_style < 3 ? ATTR_REVERSE :
+			term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
+	}
 
 	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
 
@@ -647,7 +645,10 @@ static int set_attr(int *attr)
 	case 21 ... 29:
 		cursor.rune.attr &= ~(1 << (*attr - 21));
 		return 1;
-	case 30 ... 37:
+	case 30:
+		*color = 232;
+		return 1;
+	case 31 ... 37:
 		*color = (u8) (*attr - 30);
 		return 1;
 	case 38:
