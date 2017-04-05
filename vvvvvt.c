@@ -271,20 +271,23 @@ static void create_window(void)
 {
 	// Events
 	XSetIOErrorHandler(clean_exit);
-	XSetWindowAttributes attrs;
-	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask;
-	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 
 	// Create and map the window
 	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
 	int width = 80 * w.font_width + 2 * w.border;
 	int height = 24 * w.font_height + 2 * w.border;
-	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, CopyFromParent, CopyFromParent);
+	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, None, None);
 	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), CopyFromParent);
 
-	XChangeWindowAttributes(w.disp, win, CWEventMask, &attrs);
+	// Window attributes
+	XSetWindowAttributes attrs;
+	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask;
+	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
+	attrs.bit_gravity = NorthWestGravity;
+	attrs.cursor = XCreateFontCursor(w.disp, XC_xterm);
+	XChangeWindowAttributes(w.disp, win, CWEventMask | CWBitGravity | CWCursor, &attrs);
+
 	XStoreName(w.disp, win, "vvvvvt");
-	XDefineCursor(w.disp, win, XCreateFontCursor(w.disp, XC_xterm));
 	XMapWindow(w.disp, win);
 }
 
@@ -532,7 +535,7 @@ static void on_mouse(XButtonEvent *e)
 	Point pos = pixel2cell(e->x, e->y);
 	pos.y += term.scroll;
 
-	if (!button && POINT_EQ(pos, prev))
+	if ((e->state & Mod4Mask) || (!button && POINT_EQ(pos, prev)))
 		return;
 	prev = pos;
 
