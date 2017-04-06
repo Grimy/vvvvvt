@@ -109,9 +109,10 @@ static struct {
 	int top;                             // top scroll limit
 	int bot;                             // bottom scroll limit
 	int cursor_style;
-	u8 charset[4];
+	u8 charsets[4];                      // designated charsets
+	int charset;                         // invoked charset (index inside charsets)
 	bool report_buttons, report_motion, report_focus;
-	bool alt, hide, appcursor, line_drawing;
+	bool alt, hide, appcursor;
 	bool meta_sends_escape, reverse_video;
 } term;
 
@@ -840,7 +841,7 @@ static void handle_esc(u8 second_byte)
 
 	switch (second_byte) {
 	case '(' ... '+':
-		term.charset[second_byte - '('] = final_byte;
+		term.charsets[second_byte - '('] = final_byte;
 		break;
 	case '7': // DECSC — Save Cursor
 		saved_cursors[term.alt] = cursor;
@@ -870,7 +871,7 @@ static void handle_esc(u8 second_byte)
 		break;
 	case 'n':
 	case 'o':
-		term.line_drawing = term.charset[second_byte - 'n' + 2] == '0';
+		term.charset = second_byte - 'n' + 2;
 		break;
 	}
 }
@@ -893,7 +894,7 @@ invalid_utf8:
 		return;
 	case '\016': // LS1 — Locking shift 1
 	case '\017': // LS0 — Locking shift 0
-		term.line_drawing = term.charset[u == '\016'] == '0';
+		term.charset = u == '\016';
 		return;
 	case '\033': // ESC
 		handle_esc(pty_getchar());
@@ -917,7 +918,7 @@ invalid_utf8:
 			rune->u[i & 3] = u;
 		}
 
-		if (term.line_drawing && BETWEEN(u, 'j', 'x'))
+		if (term.charsets[term.charset] == '0' && BETWEEN(u, 'j', 'x'))
 			memcpy(rune, &"┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│"[(u - 'j') * 3], 3);
 	}
 }
