@@ -119,9 +119,9 @@ static struct {
 // Drawing Context
 static struct {
 	Display *disp;
+	Window win;
 	XftFont *font[4];
 	XftDraw *draw;
-	char *font_name;
 	int width, height;
 	int font_height, font_width;
 	int border;
@@ -134,7 +134,7 @@ static char config_file[256];
 // Set all characters between lines `first` and `end` (inclusive) to the erased state
 static void erase_lines(int first, int last)
 {
-	if (sel.nb.y <= last && sel.ne.y >= first)
+	if (sel.nb.y <= last + term.scroll && sel.ne.y >= first + term.scroll)
 		clear_selection();
 	for (int y = first; y <= last; y++)
 		memset(TLINE(y), 0, sizeof(TLINE(y)));
@@ -254,6 +254,7 @@ static void selnormalize(Point oe)
 
 static bool selected(int x, int y)
 {
+	y += term.scroll;
 	return BETWEEN(y, sel.nb.y, sel.ne.y)
 		&& (y != sel.nb.y || x >= sel.nb.x)
 		&& (y != sel.ne.y || x <  sel.ne.x);
@@ -360,12 +361,14 @@ static void x_init(void)
 	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
 	int width = 80 * w.font_width + 2 * w.border;
 	int height = 24 * w.font_height + 2 * w.border;
-	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, None, None);
-	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
+	w.win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, None, None);
+	Window child = XCreateSimpleWindow(w.disp, w.win, 0, 0, 1680, 1050, 0, None, None);
+	w.draw = XftDrawCreate(w.disp, child, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
-	XChangeWindowAttributes(w.disp, win, CWEventMask | CWBitGravity | CWCursor, &attrs);
-	XStoreName(w.disp, win, "vvvvvt");
-	XMapWindow(w.disp, win);
+	XChangeWindowAttributes(w.disp, w.win, CWEventMask | CWBitGravity | CWCursor, &attrs);
+	XStoreName(w.disp, w.win, "vvvvvt");
+	XMapWindow(w.disp, w.win);
+	XMapWindow(w.disp, child);
 }
 
 static void draw_text(Rune rune, u8 *text, int len, int x, int y)
@@ -414,7 +417,7 @@ static void draw_rune(int x, int y)
 	Rune rune = TLINE(y)[x];
 
 	// Handle selection and cursor
-	if (selected(x, y + term.scroll))
+	if (selected(x, y))
 		rune.attr ^= ATTR_REVERSE;
 
 	if (!term.hide && term.scroll == term.lines && x == cursor.x && y == cursor.y) {
@@ -481,7 +484,7 @@ static void on_keypress(XKeyEvent *e)
 	KeySym keysym;
 	int len = XLookupString(e, buf, LEN(buf) - 1, &keysym, NULL);
 
-	if (selected(cursor.x, cursor.y + term.scroll))
+	if (selected(cursor.x, cursor.y))
 		clear_selection();
 
 	if (meta && term.meta_sends_escape && len)
@@ -616,11 +619,15 @@ static u8 pty_getchar(void)
 
 static void pty_new(char* cmd[])
 {
+	char window_id[24] = "";
+	sprintf(window_id, "%ld", w.win);
+
 	switch (forkpty(&pty.fd, 0, 0, 0)) {
 	case -1:
 		die("forkpty failed");
 	case 0:
 		setenv("TERM", "xterm-256color", 1);
+		setenv("WINDOWID", window_id, 1);
 		execvp(cmd[0], cmd);
 		die("exec failed");
 	default:
