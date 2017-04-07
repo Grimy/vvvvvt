@@ -7,5 +7,5 @@
 * set colors 232 — 255 as gradient from 0 → 15?
 * add bg/fg colors separate from 0 and 15?
 * do something about selection and scrolling
-* add a dirtyness system to only redraw when needed
 * only clear the selection when *drawing* something inside it
+* make sure the child window is always the same size as the parent

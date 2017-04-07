@@ -64,6 +64,7 @@ enum {
 	ATTR_REVERSE    = 1 << 6,
 	ATTR_INVISIBLE  = 1 << 7,
 	ATTR_STRUCK     = 1 << 8,
+	ATTR_DIRTY      = 1 << 9,
 };
 
 typedef struct {
@@ -357,29 +358,31 @@ static void x_init(void)
 	load_resources();
 	XSetIOErrorHandler(clean_exit);
 
-	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
+	Window root = XRootWindow(w.disp, DefaultScreen(w.disp));
 	int width = 80 * w.font_width + 2 * w.border;
 	int height = 24 * w.font_height + 2 * w.border;
-	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, None, None);
-	Window child = XCreateSimpleWindow(w.disp, win, 0, 0, 9999, 9999, 0, None, None);
-	w.draw = XftDrawCreate(w.disp, child, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
+	Window parent = XCreateSimpleWindow(w.disp, root, 0, 0, width, height, 0, None, None);
+	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, 1680, 1050, 0, None, None);
+	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
-	XChangeWindowAttributes(w.disp, win, CWEventMask | CWBitGravity | CWCursor, &attrs);
-	XSelectInput(w.disp, child, ExposureMask);
-	XStoreName(w.disp, win, "vvvvvt");
+	XChangeWindowAttributes(w.disp, parent, CWEventMask | CWBitGravity | CWCursor, &attrs);
+	XSelectInput(w.disp, win, ExposureMask);
+	XStoreName(w.disp, parent, "vvvvvt");
+	XMapWindow(w.disp, parent);
 	XMapWindow(w.disp, win);
-	XMapWindow(w.disp, child);
 }
 
-static void draw_text(Rune rune, u8 *text, int len, int x, int y)
+static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point pos)
 {
+	int x = w.border + pos.x * w.font_width;
+	int y = w.border + pos.y * w.font_height;
 	bool bold = (rune.attr & ATTR_BOLD) != 0;
 	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = w.font[bold + 2 * italic];
 	XftColor fg = colors[rune.fg || !term.reverse_video ? rune.fg : 15];
 	XftColor bg = colors[rune.bg ||  term.reverse_video ? rune.bg : 15];
 	int baseline = y + font->ascent;
-	int width = len * w.font_width;
+	int width = num_chars * w.font_width;
 
 	if (rune.attr & ATTR_INVISIBLE) {
 		fg = bg;
@@ -393,8 +396,8 @@ static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 		SWAP(fg, bg);
 
 	// Draw the background, then the text, then decorations
-	XftDrawRect(w.draw, &bg, x, y, width, w.font[0]->height + 1);
-	XftDrawStringUtf8(w.draw, &fg, font, x, baseline, text, len);
+	XftDrawRect(w.draw, &bg, x, y, width, w.font_height);
+	XftDrawStringUtf8(w.draw, &fg, font, x, baseline, text, num_bytes);
 
 	if (rune.attr & ATTR_UNDERLINE)
 		XftDrawRect(w.draw, &fg, x, baseline + 1, width, 1);
@@ -407,41 +410,42 @@ static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 }
 
 static Rune old_runes[128][LINE_SIZE];
-static bool needs_redraw;
 
 // Draws the rune at the given terminal coordinates.
-static void draw_rune(int x, int y)
+static void draw_rune(Point pos)
 {
 	static u8 buf[4 * LINE_SIZE];
 	static int len;
 	static Rune prev;
-	static int draw_x, draw_y;
+	static Point prev_pos;
 
-	Rune rune = TLINE(y)[x];
+	Rune rune = TLINE(pos.y)[pos.x];
 
 	// Handle selection and cursor
-	if (selected(x, y))
+	if (pos.x != pty.cols && selected(pos.x, pos.y))
 		rune.attr ^= ATTR_REVERSE;
 
-	if (!term.hide && term.scroll == term.lines && x == cursor.x && y == cursor.y) {
+	if (!term.hide && term.scroll == term.lines && POINT_EQ(pos, cursor)) {
 		rune.attr ^= w.focused && term.cursor_style < 3 ? ATTR_REVERSE :
 			term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 	}
 
-	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
-
-	if (x == 0 || diff) {
-		if (needs_redraw)
-			draw_text(prev, buf, len, draw_x, draw_y);
-		len = 0;
-		needs_redraw = false;
-		draw_x = w.border + x * w.font_width;
-		draw_y = w.border + y * w.font_height;
-		prev = rune;
+	if (memcmp(&rune, &old_runes[pos.y][pos.x], sizeof(Rune)) != 0) {
+		old_runes[pos.y][pos.x] = rune;
+		rune.attr |= ATTR_DIRTY;
 	}
 
-	needs_redraw |= memcmp(&rune, &old_runes[y][x], sizeof(Rune)) != 0;
-	old_runes[y][x] = rune;
+	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
+
+	if (diff && (prev.attr & ATTR_DIRTY)) {
+		draw_text(prev, buf, pos.x - prev_pos.x, len, prev_pos);
+	}
+
+	if (pos.x == 0 || diff) {
+		len = 0;
+		prev = rune;
+		prev_pos = pos;
+	}
 
 	if (*rune.u < 0x80) {
 		buf[len++] = MAX(*rune.u, ' ');
@@ -457,10 +461,9 @@ static void draw_rune(int x, int y)
 // Redraws all runes on our buffer, then flushes it to the window.
 static void draw(void)
 {
-	for (int y = 0; y < pty.rows; ++y)
-		for (int x = 0; x < pty.cols; ++x)
-			draw_rune(x, y);
-	draw_rune(0, 0);
+	for (Point pos = { 0, 0 }; pos.y < pty.rows; ++pos.y)
+		for (pos.x = 0; pos.x <= pty.cols; ++pos.x)
+			draw_rune(pos);
 	XFlush(w.disp);
 }
 
@@ -602,7 +605,7 @@ static void handle_xevent(XEvent * e)
 		break;
 	case ConfigureNotify:
 		on_resize((XConfigureEvent*) e);
-		break;
+		// Fallthrough
 	case Expose:
 		memset(old_runes, 0, sizeof(old_runes));
 		break;
