@@ -619,15 +619,11 @@ static u8 pty_getchar(void)
 
 static void pty_new(char* cmd[])
 {
-	char window_id[24] = "";
-	sprintf(window_id, "%ld", w.win);
-
 	switch (forkpty(&pty.fd, 0, 0, 0)) {
 	case -1:
 		die("forkpty failed");
 	case 0:
 		setenv("TERM", "xterm-256color", 1);
-		setenv("WINDOWID", window_id, 1);
 		execvp(cmd[0], cmd);
 		die("exec failed");
 	default:
