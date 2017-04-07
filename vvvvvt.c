@@ -130,6 +130,7 @@ static struct {
 
 static XftColor colors[256];
 static char config_file[256];
+static Rune old_runes[128][LINE_SIZE];
 
 // Set all characters between lines `first` and `end` (inclusive) to the erased state
 static void erase_lines(int first, int last)
@@ -376,13 +377,13 @@ static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point p
 {
 	int x = w.border + pos.x * w.font_width;
 	int y = w.border + pos.y * w.font_height;
+	XRectangle r = { 0, 0, (short) (num_chars * w.font_width), (short) w.font_height };
 	bool bold = (rune.attr & ATTR_BOLD) != 0;
 	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = w.font[bold + 2 * italic];
 	XftColor fg = colors[rune.fg || !term.reverse_video ? rune.fg : 15];
 	XftColor bg = colors[rune.bg ||  term.reverse_video ? rune.bg : 15];
 	int baseline = y + font->ascent;
-	int width = num_chars * w.font_width;
 
 	if (rune.attr & ATTR_INVISIBLE) {
 		fg = bg;
@@ -396,20 +397,19 @@ static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point p
 		SWAP(fg, bg);
 
 	// Draw the background, then the text, then decorations
-	XftDrawRect(w.draw, &bg, x, y, width, w.font_height);
+	XftDrawSetClipRectangles(w.draw, x, y, &r, 1);
+	XftDrawRect(w.draw, &bg, x, y, r.width, r.height);
 	XftDrawStringUtf8(w.draw, &fg, font, x, baseline, text, num_bytes);
 
 	if (rune.attr & ATTR_UNDERLINE)
-		XftDrawRect(w.draw, &fg, x, baseline + 1, width, 1);
+		XftDrawRect(w.draw, &fg, x, baseline + 1, r.width, 1);
 
 	if (rune.attr & ATTR_STRUCK)
-		XftDrawRect(w.draw, &fg, x, (2 * baseline + y) / 3, width, 1);
+		XftDrawRect(w.draw, &fg, x, (2 * baseline + y) / 3, r.width, 1);
 
 	if (rune.attr & ATTR_BAR)
 		XftDrawRect(w.draw, &fg, x, y, 2, w.font_height);
 }
-
-static Rune old_runes[128][LINE_SIZE];
 
 // Draws the rune at the given terminal coordinates.
 static void draw_rune(Point pos)
@@ -437,7 +437,7 @@ static void draw_rune(Point pos)
 
 	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
 
-	if (diff && (prev.attr & ATTR_DIRTY)) {
+	if ((pos.x == pty.cols || diff) && (prev.attr & ATTR_DIRTY)) {
 		draw_text(prev, buf, pos.x - prev_pos.x, len, prev_pos);
 	}
 
