@@ -119,7 +119,6 @@ static struct {
 // Drawing Context
 static struct {
 	Display *disp;
-	Window win;
 	XftFont *font[4];
 	XftDraw *draw;
 	int width, height;
@@ -350,7 +349,7 @@ static void x_init(void)
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
 
 	XSetWindowAttributes attrs;
-	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask | VisibilityChangeMask;
+	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask;
 	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
 	attrs.bit_gravity = NorthWestGravity;
 	attrs.cursor = XCreateFontCursor(w.disp, XC_xterm);
@@ -361,13 +360,14 @@ static void x_init(void)
 	Window parent = XRootWindow(w.disp, DefaultScreen(w.disp));
 	int width = 80 * w.font_width + 2 * w.border;
 	int height = 24 * w.font_height + 2 * w.border;
-	w.win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, None, None);
-	Window child = XCreateSimpleWindow(w.disp, w.win, 0, 0, 1680, 1050, 0, None, None);
+	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, width, height, 0, None, None);
+	Window child = XCreateSimpleWindow(w.disp, win, 0, 0, 9999, 9999, 0, None, None);
 	w.draw = XftDrawCreate(w.disp, child, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
-	XChangeWindowAttributes(w.disp, w.win, CWEventMask | CWBitGravity | CWCursor, &attrs);
-	XStoreName(w.disp, w.win, "vvvvvt");
-	XMapWindow(w.disp, w.win);
+	XChangeWindowAttributes(w.disp, win, CWEventMask | CWBitGravity | CWCursor, &attrs);
+	XSelectInput(w.disp, child, ExposureMask);
+	XStoreName(w.disp, win, "vvvvvt");
+	XMapWindow(w.disp, win);
 	XMapWindow(w.disp, child);
 }
 
@@ -406,6 +406,9 @@ static void draw_text(Rune rune, u8 *text, int len, int x, int y)
 		XftDrawRect(w.draw, &fg, x, y, 2, w.font_height);
 }
 
+static Rune old_runes[128][LINE_SIZE];
+static bool needs_redraw;
+
 // Draws the rune at the given terminal coordinates.
 static void draw_rune(int x, int y)
 {
@@ -428,12 +431,17 @@ static void draw_rune(int x, int y)
 	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
 
 	if (x == 0 || diff) {
-		draw_text(prev, buf, len, draw_x, draw_y);
+		if (needs_redraw)
+			draw_text(prev, buf, len, draw_x, draw_y);
 		len = 0;
+		needs_redraw = false;
 		draw_x = w.border + x * w.font_width;
 		draw_y = w.border + y * w.font_height;
 		prev = rune;
 	}
+
+	needs_redraw |= memcmp(&rune, &old_runes[y][x], sizeof(Rune)) != 0;
+	old_runes[y][x] = rune;
 
 	if (*rune.u < 0x80) {
 		buf[len++] = MAX(*rune.u, ' ');
@@ -594,6 +602,9 @@ static void handle_xevent(XEvent * e)
 		break;
 	case ConfigureNotify:
 		on_resize((XConfigureEvent*) e);
+		break;
+	case Expose:
+		memset(old_runes, 0, sizeof(old_runes));
 		break;
 	case FocusIn:
 	case FocusOut:
