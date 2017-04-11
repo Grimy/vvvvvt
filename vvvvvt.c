@@ -16,10 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
-#include <time.h>
 #include <unistd.h>
 
 // Config
@@ -125,14 +123,12 @@ static struct {
 	Display *disp;
 	XftFont *font[4];
 	XftDraw *draw;
-	int width, height;
 	int font_height, font_width;
 	int border;
 	bool focused;
 } w;
 
 static XftColor colors[256];
-static char config_file[256];
 static Rune old_runes[128][LINE_SIZE];
 
 // Set all characters between lines `first` and `end` (inclusive) to the erased state
@@ -191,8 +187,8 @@ static void scroll(int n)
 
 static Point pixel2cell(int px, int py)
 {
-	int x = (px - w.border) / w.font_width;
-	int y = (py - w.border) / w.font_height;
+	int x = px / w.font_width;
+	int y = py / w.font_height;
 	return (Point) { MAX(x, 0), MAX(y, 0) };
 }
 
@@ -299,13 +295,6 @@ static const char* get_resource(const char* resource, const char* fallback)
 }
 
 static void load_resources() {
-	char *xdg_config = getenv("XDG_CONFIG_HOME");
-	strcpy(config_file, xdg_config ? xdg_config : getenv("HOME"));
-	strcat(config_file, "/Xresources");
-
-	XrmDatabase xrm = XrmGetFileDatabase(config_file);
-	XrmSetDatabase(w.disp, xrm);
-
 	// Fonts
 	const char *face_name = get_resource("faceName", "mono");
 	const char *style[] = { "", "bold", "italic", "bold italic" };
@@ -336,8 +325,6 @@ static void load_resources() {
 	w.border = atoi(get_resource("internalBorder", "2"));
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
 	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
-
-	XrmDestroyDatabase(xrm);
 }
 
 static void x_init(void)
@@ -350,34 +337,31 @@ static void x_init(void)
 	setlocale(LC_CTYPE, ""); // required to parse keypresses correctly
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
 
-	XSetWindowAttributes attrs;
-	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask;
-	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
-	attrs.cursor = XCreateFontCursor(w.disp, XC_xterm);
-
 	load_resources();
 	XSetIOErrorHandler(clean_exit);
 
 	Window root = XRootWindow(w.disp, DefaultScreen(w.disp));
+	XSelectInput(w.disp, root, PropertyChangeMask);
+
 	u32 width = 80 * w.font_width + 2 * w.border;
 	u32 height = 24 * w.font_height + 2 * w.border;
-	Window parent = XCreateSimpleWindow(w.disp, root, 0, 0, width, height, 0, None, None);
-	XWindowAttributes root_attrs;
-	XGetWindowAttributes(w.disp, root, &root_attrs);
-	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, root_attrs.width, root_attrs.height, 0, None, None);
-	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
-	XChangeWindowAttributes(w.disp, parent, CWEventMask | CWCursor, &attrs);
-	XSelectInput(w.disp, win, ExposureMask);
+	Window parent = XCreateSimpleWindow(w.disp, root, 0, 0, width, height, 0, None, None);
+	XDefineCursor(w.disp, parent, XCreateFontCursor(w.disp, XC_xterm));
+	XSelectInput(w.disp, parent, FocusChangeMask | StructureNotifyMask | KeyPressMask);
 	XStoreName(w.disp, parent, "vvvvvt");
 	XMapWindow(w.disp, parent);
+
+	Window win = XCreateSimpleWindow(w.disp, parent, w.border, w.border, ~0u, ~0u, 0, None, None);
+	XSelectInput(w.disp, win, ExposureMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask);
 	XMapWindow(w.disp, win);
+	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 }
 
 static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point pos)
 {
-	int x = w.border + pos.x * w.font_width;
-	int y = w.border + pos.y * w.font_height;
+	int x = pos.x * w.font_width;
+	int y = pos.y * w.font_height;
 	XRectangle r = { 0, 0, (short) (num_chars * w.font_width), (short) w.font_height };
 	bool bold = (rune.attr & ATTR_BOLD) != 0;
 	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
@@ -526,25 +510,46 @@ static void on_keypress(XKeyEvent *e)
 
 static void on_resize(XConfigureEvent *e)
 {
-	if (e->width == w.width && e->height == w.height)
+	static int old_width, old_height;
+	if (e->width == old_width && e->height == old_height)
 		return;
+	old_width = e->width;
+	old_height = e->height;
 
 	// Update terminal info
-	Point pty_size = pixel2cell(e->width, e->height);
+	Point pty_size = pixel2cell(e->width - 2 * w.border, e->height - 2 * w.border);
 	pty.cols = MIN((u16) pty_size.x, LINE_SIZE - 1);
 	pty.rows = MIN((u16) pty_size.y, HIST_SIZE / 2);
 	term.top = 0;
 	term.bot = pty.rows - 1;
 	move_to(cursor.x, cursor.y);
 
-	// Update X window data
-	w.width = e->width;
-	w.height = e->height;
-
 	// Send our size to the pty driver so that applications can query it
 	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
 	if (ioctl(pty.fd, TIOCSWINSZ, &size) < 0)
 		perror("Couldn't set window size");
+}
+
+static void on_property_change(XPropertyEvent *e)
+{
+	static XrmDatabase xrm;
+
+	if (e->atom != XInternAtom(w.disp, "RESOURCE_MANAGER", false))
+		return;
+
+	union { Atom atom; int i; unsigned long ul; } ignored;
+	unsigned char *xprop;
+	XGetWindowProperty(w.disp, e->window, e->atom, 0, 65536, 0, AnyPropertyType,
+			&ignored.atom, &ignored.i, &ignored.ul, &ignored.ul, &xprop);
+
+	if (xrm)
+		XrmDestroyDatabase(xrm);
+	xrm = XrmGetStringDatabase((char*) xprop);
+	XrmSetDatabase(w.disp, xrm);
+	XFree(xprop);
+
+	load_resources();
+	dirty_everything();
 }
 
 static void on_mouse(XButtonEvent *e)
@@ -607,6 +612,9 @@ static void handle_xevent(XEvent * e)
 	case ConfigureNotify:
 		on_resize((XConfigureEvent*) e);
 		dirty_everything();
+		break;
+	case PropertyNotify:
+		on_property_change((XPropertyEvent*) e);
 		break;
 	case Expose:
 		dirty_everything();
@@ -959,51 +967,30 @@ invalid_utf8:
 	}
 }
 
-static void __attribute__((noreturn)) run(void)
+static void run(fd_set read_fds)
 {
-	fd_set read_fds;
-	int xfd = XConnectionNumber(w.disp);
-	int ifd = inotify_init();
-	int nfd = MAX(ifd, MAX(xfd, pty.fd)) + 1;
-	struct timeval timeout = { 0, 0 };
+	static struct timeval timeout;
 
-	inotify_add_watch(ifd, config_file, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
+	if (select(pty.fd + 1, &read_fds, 0, 0, &timeout) < 0)
+		die("select failed");
 
-	for (;;) {
-		FD_ZERO(&read_fds);
-		FD_SET(pty.fd, &read_fds);
-		FD_SET(ifd, &read_fds);
-		FD_SET(xfd, &read_fds);
+	if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
+		term.scroll = term.lines;
+		pty_putchar(pty_getchar());
+		while (pty.c < pty.end)
+			pty_putchar(*pty.c++);
+	}
 
-		if (select(nfd, &read_fds, 0, 0, &timeout) < 0)
-			die("select failed");
+	XEvent e;
+	while (XPending(w.disp)) {
+		XNextEvent(w.disp, &e);
+		handle_xevent(&e);
+	}
 
-		if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
-			term.scroll = term.lines;
-			pty_putchar(pty_getchar());
-			while (pty.c < pty.end)
-				pty_putchar(*pty.c++);
-		}
-
-		if (FD_ISSET(ifd, &read_fds)) {
-			u8 buf[BUFSIZ];
-			read(ifd, buf, BUFSIZ);
-			inotify_add_watch(ifd, config_file, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
-			load_resources();
-			dirty_everything();
-		}
-
-		XEvent e;
-		while (XPending(w.disp)) {
-			XNextEvent(w.disp, &e);
-			handle_xevent(&e);
-		}
-
-		timeout.tv_usec = MIN(timeout.tv_usec - 50, 20000);
-		if (timeout.tv_usec <= 0) {
-			draw();
-			timeout.tv_usec = 999999;
-		}
+	timeout.tv_usec = MIN(timeout.tv_usec - 50, 20000);
+	if (timeout.tv_usec <= 0) {
+		draw();
+		timeout.tv_usec = 999999;
 	}
 }
 
@@ -1011,5 +998,12 @@ int main(int argc, char *argv[])
 {
 	x_init();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
-	run();
+
+	fd_set read_fds;
+	FD_ZERO(&read_fds);
+	FD_SET(XConnectionNumber(w.disp), &read_fds);
+	FD_SET(pty.fd, &read_fds);
+
+	for (;;)
+		run(read_fds);
 }
