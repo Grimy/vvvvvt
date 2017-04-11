@@ -710,6 +710,7 @@ static void set_mode(bool set, int mode)
 		break;
 	case 5:    // DECSCNM — Reverse video
 		term.reverse_video = set;
+		dirty_everything();
 		break;
 	case 25:   // DECTCEM — Show cursor
 		term.hide = !set;

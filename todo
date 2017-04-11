@@ -9,3 +9,4 @@
 * avoid writing to [pty.cols]
 * fix selection around newlines
 * make border color configurable
+* either fix or remove \e[?5h (reverse video)
