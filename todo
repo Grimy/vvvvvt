@@ -1,5 +1,4 @@
 * consider cairo
-* consider using mtime instead of inotify
 * handle saveLines
 * fuzz some more
 * more tests

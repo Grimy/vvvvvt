@@ -76,16 +76,16 @@ typedef struct {
 	u8 bg;     // background color
 } Rune;
 
+typedef struct {
+	int x;
+	int y;
+} Point;
+
 static struct {
 	Rune rune; // current char attributes
 	int x;
 	int y;
 } cursor, saved_cursors[2];
-
-typedef struct {
-	int x;
-	int y;
-} Point;
 
 static struct {
 	int snap; // snapping mode
@@ -151,7 +151,8 @@ static void erase_chars(int first, int last)
 		line[x] = (Rune) { "", 0, 0, cursor.rune.bg };
 }
 
-static void move_lines(int start, int end, int diff) {
+static void move_lines(int start, int end, int diff)
+{
 	int step = diff < 0 ? -1 : 1;
 	if (diff < 0)
 		SWAP(start, end);
@@ -646,6 +647,15 @@ static void pty_new(char* cmd[])
 	}
 }
 
+static void reset()
+{
+	memset(&cursor.rune, 0, sizeof(cursor.rune));
+	memset(&saved_cursors, 0, sizeof(saved_cursors));
+	term.top = 0;
+	term.bot = pty.rows - 1;
+	load_resources();
+}
+
 static int set_attr(int *attr)
 {
 	u8 *color = &cursor.rune.fg;
@@ -833,8 +843,7 @@ next_csi_byte:
 			dprintf(pty.fd, "\033[%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
 	case 'p': // DECSTR — Soft terminal reset
-		memset(&term.top, 0, sizeof(term) - ((char*) &term.top - (char*) &term));
-		term.bot = pty.rows - 1;
+		reset();
 		break;
 	case 'q': // DECSCUSR — Set Cursor Style
 		if (*arg <= 6)
@@ -893,7 +902,8 @@ static void handle_esc(u8 second_byte)
 		break;
 	case 'c': // RIS — Reset to inital state
 		memset(&term, 0, sizeof(term));
-		term.bot = pty.rows - 1;
+		move_to(0, 0);
+		reset();
 		break;
 	case 'n':
 	case 'o':
