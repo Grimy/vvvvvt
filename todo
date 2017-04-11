@@ -1,11 +1,12 @@
-* handle saveLines
-* fuzz some more
-* bracketed paste?
-* more tests
 * consider cairo
 * consider using mtime instead of inotify
+* handle saveLines
+* fuzz some more
+* more tests
 * set colors 232 — 255 as gradient from 0 → 15?
 * add bg/fg colors separate from 0 and 15?
 * do something about selection and scrolling
 * make sure the child window is always the same size as the parent
 * avoid writing to [pty.cols]
+* fix selection around newlines
+* make border color configurable

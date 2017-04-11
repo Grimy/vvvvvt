@@ -41,6 +41,8 @@
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
 #define clear_selection()   (sel.ne.y = -1)
+#define dirty_everything()  (memset(old_runes, 255, sizeof(old_runes)))
+
 #define die(message)        do { perror(message); clean_exit(w.disp); } while (0)
 
 typedef enum { false, true } bool;
@@ -115,6 +117,7 @@ static struct {
 	bool report_buttons, report_motion, report_focus;
 	bool alt, hide, appcursor;
 	bool meta_sends_escape, reverse_video;
+	bool bracketed_paste;
 } term;
 
 // Drawing Context
@@ -164,16 +167,6 @@ static void move_to(int x, int y)
 	cursor.y = LIMIT(y, 0, pty.rows - 1);
 }
 
-static void swap_screen(void)
-{
-	clear_selection();
-	saved_cursors[term.alt] = cursor;
-	term.alt = !term.alt;
-	cursor = saved_cursors[term.alt];
-	term.lines += term.alt ? pty.rows : -pty.rows;
-	term.scroll = term.lines;
-}
-
 static void newline()
 {
 	if (cursor.y != term.bot) {
@@ -199,7 +192,7 @@ static Point pixel2cell(int px, int py)
 {
 	int x = (px - w.border) / w.font_width;
 	int y = (py - w.border) / w.font_height;
-	return (Point) { x, y };
+	return (Point) { MAX(x, 0), MAX(y, 0) };
 }
 
 static void copy(bool clipboard)
@@ -228,10 +221,16 @@ static void paste(bool clipboard)
 {
 	FILE* pipe = popen(clipboard ? "xsel -bo" : "xsel -o", "r");
 
+	if (term.bracketed_paste)
+		dprintf(pty.fd, "\033[200~");
+
 	char sel_buf[BUFSIZ] = "";
 	fread(sel_buf, 1, BUFSIZ, pipe);
 	for (char *p = sel_buf; (p = strchr(p, '\n')); *p++ = '\r');
 	dprintf(pty.fd, "%s", sel_buf);
+
+	if (term.bracketed_paste)
+		dprintf(pty.fd, "\033[201~");
 
 	pclose(pipe);
 }
@@ -333,7 +332,7 @@ static void load_resources() {
 	double scale_height = atof(get_resource("scaleHeight", "1"));
 	w.font_height = (int) ((w.font[0]->height + 1) * scale_height + .999);
 	w.font_width = w.font[0]->max_advance_width;
-	w.border = atoi(get_resource("borderWidth", "2"));
+	w.border = atoi(get_resource("internalBorder", "2"));
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
 	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
 
@@ -353,20 +352,21 @@ static void x_init(void)
 	XSetWindowAttributes attrs;
 	attrs.event_mask = FocusChangeMask | StructureNotifyMask | KeyPressMask;
 	attrs.event_mask |= PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
-	attrs.bit_gravity = NorthWestGravity;
 	attrs.cursor = XCreateFontCursor(w.disp, XC_xterm);
 
 	load_resources();
 	XSetIOErrorHandler(clean_exit);
 
 	Window root = XRootWindow(w.disp, DefaultScreen(w.disp));
-	int width = 80 * w.font_width + 2 * w.border;
-	int height = 24 * w.font_height + 2 * w.border;
+	u32 width = 80 * w.font_width + 2 * w.border;
+	u32 height = 24 * w.font_height + 2 * w.border;
 	Window parent = XCreateSimpleWindow(w.disp, root, 0, 0, width, height, 0, None, None);
-	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, 1680, 1050, 0, None, None);
+	XWindowAttributes root_attrs;
+	XGetWindowAttributes(w.disp, root, &root_attrs);
+	Window win = XCreateSimpleWindow(w.disp, parent, 0, 0, root_attrs.width, root_attrs.height, 0, None, None);
 	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
-	XChangeWindowAttributes(w.disp, parent, CWEventMask | CWBitGravity | CWCursor, &attrs);
+	XChangeWindowAttributes(w.disp, parent, CWEventMask | CWCursor, &attrs);
 	XSelectInput(w.disp, win, ExposureMask);
 	XStoreName(w.disp, parent, "vvvvvt");
 	XMapWindow(w.disp, parent);
@@ -605,9 +605,10 @@ static void handle_xevent(XEvent * e)
 		break;
 	case ConfigureNotify:
 		on_resize((XConfigureEvent*) e);
-		// Fallthrough
+		dirty_everything();
+		break;
 	case Expose:
-		memset(old_runes, 0, sizeof(old_runes));
+		dirty_everything();
 		break;
 	case FocusIn:
 	case FocusOut:
@@ -697,10 +698,15 @@ static void set_mode(bool set, int mode)
 		break;
 	case 47:
 	case 1049: // Alternate screen buffer
-		if (set ^ term.alt)
-			swap_screen();
+		clear_selection();
+		term.lines += (set - term.alt) * pty.rows;
+		term.scroll = term.lines;
 		if (set)
 			erase_lines(0, pty.rows - 1);
+		else
+			cursor = saved_cursors[0];
+		saved_cursors[term.alt] = cursor;
+		term.alt = set;
 		break;
 	case 1000: // Report mouse buttons
 	case 1003: // Report mouse motion
@@ -712,6 +718,9 @@ static void set_mode(bool set, int mode)
 		break;
 	case 1036: // Send ESC when Meta modifies a key
 		term.meta_sends_escape = set;
+		break;
+	case 2004: // Send special sequences before/after each paste
+		term.bracketed_paste = set;
 		break;
 	}
 }
@@ -971,6 +980,7 @@ static void __attribute__((noreturn)) run(void)
 			read(ifd, buf, BUFSIZ);
 			inotify_add_watch(ifd, config_file, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
 			load_resources();
+			dirty_everything();
 		}
 
 		XEvent e;
