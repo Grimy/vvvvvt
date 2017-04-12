@@ -39,7 +39,6 @@
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
 #define clear_selection()   (sel.end.y = -1)
-#define dirty_everything()  (memset(old_runes, 255, sizeof(old_runes)))
 
 #define die(message)        do { perror(message); clean_exit(w.disp); } while (0)
 
@@ -129,12 +128,14 @@ static struct {
 	XftFont *font[4];
 	XftDraw *draw;
 	XftColor colors[256];
+	Window parent;
+	Window win;
+	int screen;
+	bool dirty;
 	int font_height, font_width;
 	int border;
 	bool focused;
 } w;
-
-static Rune old_runes[128][LINE_SIZE];
 
 // Erase all characters between lines `start` and `end` (exclusive)
 static void erase_lines(int start, int end)
@@ -183,6 +184,7 @@ static void newline()
 		++term.lines;
 		++term.scroll;
 		move_lines(term.bot, pty.rows - 1, -1);
+		erase_lines(2 * pty.rows - 1, 2 * pty.rows);
 	}
 }
 
@@ -190,7 +192,7 @@ static void newline()
 static void scroll(int n)
 {
 	term.scroll += n;
-	LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + pty.rows), term.lines);
+	LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + 2 * pty.rows), term.lines);
 }
 
 // Get the text coordinates corresponding to the given pixel coordinates
@@ -322,20 +324,21 @@ static void load_resources() {
 		sprintf(font_name, "%s:style=%s", face_name, style[i]);
 		if (w.font[i])
 			XftFontClose(w.disp, w.font[i]);
-		w.font[i] = XftFontOpenName(w.disp, DefaultScreen(w.disp), font_name);
+		w.font[i] = XftFontOpenName(w.disp, w.screen, font_name);
 	}
 
 	// Colors
-	Colormap colormap = DefaultColormap(w.disp, DefaultScreen(w.disp));
+	Colormap colormap = DefaultColormap(w.disp, w.screen);
 	char color_name[16] = "color";
 	char def[16] = "";
 	for (u16 i = 0; i < 256; ++i) {
 		sprintf(color_name + 5, "%d", i);
 		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
 		XColor *color = (XColor*) &w.colors[i];
-		XLookupColor(w.disp, colormap, get_resource(color_name, def), color, color);
+		XAllocNamedColor(w.disp, colormap, get_resource(color_name, def), color, color);
 		w.colors[i].color.alpha = 0xffff;
 	}
+	XSetWindowBackground(w.disp, w.parent, w.colors[4].pixel);
 
 	// Others
 	double scale_height = atof(get_resource("scaleHeight", "1"));
@@ -344,6 +347,12 @@ static void load_resources() {
 	w.border = atoi(get_resource("internalBorder", "2"));
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
 	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
+
+	u32 width = pty.cols * w.font_width;
+	u32 height = pty.rows * w.font_height;
+	XMoveWindow(w.disp, w.win, w.border, w.border);
+	XResizeWindow(w.disp, w.win, width, height);
+	XResizeWindow(w.disp, w.parent, width + 2 * w.border, height + 2 * w.border);
 }
 
 // Connect to the X server and set up our windows (gritty X11 stuff)
@@ -354,28 +363,27 @@ static void x_init(void)
 		exit(1);
 	}
 
+	w.screen = XDefaultScreen(w.disp);
 	setlocale(LC_CTYPE, ""); // required to parse keypresses correctly
 	XSetLocaleModifiers(""); // Xlib leaks memory if we don’t call this
-
-	load_resources();
-	XSetIOErrorHandler(clean_exit);
 
 	Window root = XRootWindow(w.disp, DefaultScreen(w.disp));
 	XSelectInput(w.disp, root, PropertyChangeMask);
 
-	u32 width = 80 * w.font_width + 2 * w.border;
-	u32 height = 24 * w.font_height + 2 * w.border;
-
-	Window parent = XCreateSimpleWindow(w.disp, root, 0, 0, width, height, 0, None, None);
-	XDefineCursor(w.disp, parent, XCreateFontCursor(w.disp, XC_xterm));
-	XSelectInput(w.disp, parent, ExposureMask | FocusChangeMask | StructureNotifyMask
+	w.parent = XCreateSimpleWindow(w.disp, root, 0, 0, 640, 480, 0, None, None);
+	XDefineCursor(w.disp, w.parent, XCreateFontCursor(w.disp, XC_xterm));
+	XSelectInput(w.disp, w.parent, ExposureMask | FocusChangeMask | StructureNotifyMask
 			| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask);
-	XStoreName(w.disp, parent, "vvvvvt");
-	XMapWindow(w.disp, parent);
+	XStoreName(w.disp, w.parent, "vvvvvt");
+	XMapWindow(w.disp, w.parent);
 
-	Window win = XCreateSimpleWindow(w.disp, parent, w.border, w.border, ~0u, ~0u, 0, None, None);
-	XMapWindow(w.disp, win);
-	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
+	w.win = XCreateSimpleWindow(w.disp, w.parent, 0, 0, 1, 1, 0, None, None);
+	XChangeWindowAttributes(w.disp, w.win, CWBitGravity, &(XSetWindowAttributes) { .bit_gravity = NorthWestGravity });
+	XMapWindow(w.disp, w.win);
+	w.draw = XftDrawCreate(w.disp, w.win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
+
+	load_resources();
+	XSetIOErrorHandler(clean_exit);
 }
 
 static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point pos)
@@ -425,6 +433,7 @@ static void draw_rune(Point pos)
 	static Point prev_pos;
 
 	Rune rune = TLINE(pos.y)[pos.x];
+	Rune *old_rune = &SLINE(pos.y + term.lines + pty.rows)[pos.x];
 
 	// Handle selection and cursor
 	if (pos.x != pty.cols && selected(pos.x, pos.y))
@@ -435,8 +444,8 @@ static void draw_rune(Point pos)
 			term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 	}
 
-	if (memcmp(&rune, &old_runes[pos.y][pos.x], sizeof(Rune)) != 0) {
-		old_runes[pos.y][pos.x] = rune;
+	if (w.dirty || memcmp(&rune, old_rune, sizeof(Rune))) {
+		*old_rune = rune;
 		rune.attr |= ATTR_DIRTY;
 	}
 
@@ -467,10 +476,18 @@ static void draw_rune(Point pos)
 // Update the display
 static void draw(void)
 {
+	static int old_lines;
+	if (term.lines != old_lines) {
+		XCopyArea(w.disp, w.win, w.win, XDefaultGC(w.disp, w.screen),
+			0, (term.lines - old_lines) * w.font_height,
+			pty.cols * w.font_width, 9999, 0, 0);
+		old_lines = term.lines;
+	}
 	for (Point pos = { 0, 0 }; pos.y < pty.rows; ++pos.y)
 		for (pos.x = 0; pos.x <= pty.cols; ++pos.x)
 			draw_rune(pos);
 	XFlush(w.disp);
+	w.dirty = false;
 }
 
 // Print the escape sequence for special key `c`, with modifiers `state`
@@ -541,12 +558,13 @@ static void on_resize(XConfigureEvent *e)
 		return;
 
 	// Update terminal info
-	pty.cols = MIN((u16) new_size.x, LINE_SIZE - 1);
-	pty.rows = MIN((u16) new_size.y, HIST_SIZE / 2);
+	pty.cols = LIMIT(new_size.x, 1, LINE_SIZE - 1);
+	pty.rows = LIMIT(new_size.y, 1, HIST_SIZE / 2);
 	term.top = 0;
 	term.bot = pty.rows - 1;
 	move_to(cursor.x, cursor.y);
-	dirty_everything();
+
+	XResizeWindow(w.disp, w.win, pty.cols * w.font_width, pty.rows * w.font_height);
 
 	// Send our size to the pty driver so that applications can query it
 	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
@@ -574,7 +592,7 @@ static void on_property_change(XPropertyEvent *e)
 	XFree(xprop);
 
 	load_resources();
-	dirty_everything();
+	w.dirty = true;
 }
 
 // Handle selection, middle-click paste, and scrolling with the wheel
@@ -643,7 +661,7 @@ static void dispatch_event(XEvent * e)
 		on_property_change((XPropertyEvent*) e);
 		break;
 	case Expose:
-		dirty_everything();
+		w.dirty = true;
 		break;
 	case FocusIn:
 	case FocusOut:
@@ -689,7 +707,6 @@ static void reset()
 	memset(&saved_cursors, 0, sizeof(saved_cursors));
 	term.top = 0;
 	term.bot = pty.rows - 1;
-	load_resources();
 }
 
 static int set_attr(int *attr)
@@ -738,7 +755,7 @@ static void set_mode(bool set, int mode)
 		break;
 	case 5:    // DECSCNM — Reverse video
 		term.reverse_video = set;
-		dirty_everything();
+		w.dirty = true;
 		break;
 	case 25:   // DECTCEM — Show cursor
 		term.hide = !set;
@@ -1024,6 +1041,8 @@ static void run(fd_set read_fds)
 
 int main(int argc, char *argv[])
 {
+	pty.rows = 24;
+	pty.cols = 80;
 	x_init();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 
