@@ -79,10 +79,10 @@ typedef struct {
 	int y;
 } Point;
 
+// State affected by save cursor / restore cursor
 static struct {
 	Rune rune; // current char attributes
-	int x;
-	int y;
+	int x, y;  // cursor position
 } cursor, saved_cursors[2];
 
 static struct {
@@ -94,59 +94,66 @@ static struct {
 
 static struct {
 	char buf[BUFSIZ];  // input buffer
-	char *c;           // current reading position (points inside buf)
-	char *end;         // one past the last valid char in buf
+	char *c;           // current reading position (points inside `buf`)
+	char *end;         // one past the last valid char (points inside `buf`)
 	int fd;            // file descriptor of the master pty
-	int: 32;
 	int rows;          // number of lines in a screen
 	int cols;          // number of characters in a line
+	int: 32;
 } pty;
 
 // Terminal state
 static struct {
-	Rune hist[HIST_SIZE][LINE_SIZE];     // history ring buffer
-	int scroll;                          // hist index of the scroll position
-	int lines;                           // hist index of the last line
-	int top;                             // top scroll limit
-	int bot;                             // bottom scroll limit
-	int cursor_style;
-	u8 charsets[4];                      // designated charsets
-	int charset;                         // invoked charset (index inside charsets)
-	bool report_buttons, report_motion, report_focus;
-	bool alt, hide, appcursor;
-	bool meta_sends_escape, reverse_video;
-	bool bracketed_paste;
+	Rune hist[HIST_SIZE][LINE_SIZE]; // history ring buffer
+	int scroll;                      // scroll position (index inside `hist`)
+	int lines;                       // last line printed (index inside `hist`)
+	int top;                         // top scroll limit
+	int bot;                         // bottom scroll limit
+	int cursor_style;                // appearance of the cursor
+	u8 charsets[4];                  // designated character sets
+	int charset;                     // invoked character set (index inside `charsets`)
+	bool alt;                        // use the alternate screen buffer?
+	bool hide;                       // hide the cursor?
+	bool reverse_video;              // use a dark background?
+	bool report_buttons;             // report clicks/scrolls to the application?
+	bool report_motion;              // report mouse motions to the application?
+	bool report_focus;               // report focus in/out events to the application?
+	bool bracketed_paste;            // send escape sequences before/after each paste?
+	bool app_keys;                   // send different escape sequences for arrow keys?
+	bool meta_sends_escape;          // send an ESC char when a key is pressed with meta held?
 } term;
 
-// Drawing Context
+// Drawing context
 static struct {
 	Display *disp;
 	XftFont *font[4];
 	XftDraw *draw;
+	XftColor colors[256];
 	int font_height, font_width;
 	int border;
 	bool focused;
 } w;
 
-static XftColor colors[256];
 static Rune old_runes[128][LINE_SIZE];
 
-// Set all characters between lines `first` and `end` (inclusive) to the erased state
-static void erase_lines(int first, int last)
+// Erase all characters between lines `start` and `end` (exclusive)
+static void erase_lines(int start, int end)
 {
-	if (sel.start.y <= last + term.scroll && sel.end.y >= first + term.scroll)
+	if (sel.start.y < end + term.scroll && sel.end.y >= start + term.scroll)
 		clear_selection();
-	for (int y = first; y <= last; y++)
+	for (int y = start; y < end; y++)
 		memset(TLINE(y), 0, sizeof(TLINE(y)));
 }
 
-static void erase_chars(int first, int last)
+// Erase characters between columns `start` and `end` in the current line
+static void erase_chars(int start, int end)
 {
 	Rune *line = TLINE(cursor.y);
-	for (int x = first; x <= last; ++x)
+	for (int x = start; x < end; ++x)
 		line[x] = (Rune) { "", 0, 0, cursor.rune.bg };
 }
 
+// Move lines between `start` and `end` by `diff` rows down
 static void move_lines(int start, int end, int diff)
 {
 	int step = diff < 0 ? -1 : 1;
@@ -155,15 +162,17 @@ static void move_lines(int start, int end, int diff)
 	int last = end - diff + step;
 	for (int y = start; y != last; y += step)
 		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
-	erase_lines(MIN(last, end), MAX(last, end));
+	erase_lines(MIN(last, end), MAX(last, end) + 1);
 }
 
+// Set the cursor position
 static void move_to(int x, int y)
 {
 	cursor.x = LIMIT(x, 0, pty.cols - 1);
 	cursor.y = LIMIT(y, 0, pty.rows - 1);
 }
 
+// Move the cursor to the next line, scrolling if necessary
 static void newline()
 {
 	if (cursor.y != term.bot) {
@@ -177,14 +186,14 @@ static void newline()
 	}
 }
 
+// Scroll the viewport `n` lines down (n < 0: scroll up)
 static void scroll(int n)
 {
-	if (!term.alt) {
-		term.scroll += n;
-		LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + pty.rows), term.lines);
-	}
+	term.scroll += n;
+	LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + pty.rows), term.lines);
 }
 
+// Get the text coordinates corresponding to the given pixel coordinates
 static Point pixel2cell(int px, int py)
 {
 	int x = px / w.font_width;
@@ -192,6 +201,7 @@ static Point pixel2cell(int px, int py)
 	return (Point) { MAX(x, 0), MAX(y, 0) };
 }
 
+// Copy the selected text to the primary selection (or the clipboard, if `clipboard` is set)
 static void copy(bool clipboard)
 {
 	// If the selection is empty, leave the clipboard as-is rather than emptying it
@@ -214,6 +224,7 @@ static void copy(bool clipboard)
 	pclose(pipe);
 }
 
+// Print the primary selection (or the clipboard, if `clipboard` is set) to the terminal
 static void paste(bool clipboard)
 {
 	FILE* pipe = popen(clipboard ? "xsel -bo" : "xsel -o", "r");
@@ -232,8 +243,11 @@ static void paste(bool clipboard)
 	pclose(pipe);
 }
 
+// Set the selection’s point (last position selected)
 static void sel_set_point(Point point)
 {
+	// `point` can be before `mark` (if the user drags the mouse up/left),
+	// but `end` should always be after `start`
 	bool swapped = POINT_GT(sel.mark, point);
 	sel.start = swapped ? point : sel.mark;
 	sel.end = swapped ? sel.mark : point;
@@ -249,6 +263,7 @@ static void sel_set_point(Point point)
 	}
 }
 
+// Is the character at row `y`, column `x` currently selected?
 static bool selected(int x, int y)
 {
 	y += term.scroll;
@@ -257,6 +272,7 @@ static bool selected(int x, int y)
 		&& (y != sel.end.y || x < sel.end.x);
 }
 
+// Keep Valgrind from complaining
 static int __attribute__((noreturn)) clean_exit(Display *disp)
 {
 	for (int i = 0; i < 4; ++i)
@@ -283,17 +299,20 @@ static u16 default_color(u16 i, int rgb)
 	return i ? 55 + 40 * i : 0;
 }
 
+// Should `word` be treated as true when used as an X resource?
 static bool is_true(const char* word)
 {
 	return !strcasecmp(word, "true") || !strcasecmp(word, "yes") || !strcasecmp(word, "on");
 }
 
+// Get the value of the resource `resource`, defaulting to `fallback`
 static const char* get_resource(const char* resource, const char* fallback)
 {
 	char* result = XGetDefault(w.disp, "vvvvvt", resource);
 	return result ? result : fallback;
 }
 
+// Read the X resources used for configuration and take action accordingly
 static void load_resources() {
 	// Fonts
 	const char *face_name = get_resource("faceName", "mono");
@@ -313,9 +332,9 @@ static void load_resources() {
 	for (u16 i = 0; i < 256; ++i) {
 		sprintf(color_name + 5, "%d", i);
 		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
-		XColor *color = (XColor*) &colors[i];
+		XColor *color = (XColor*) &w.colors[i];
 		XLookupColor(w.disp, colormap, get_resource(color_name, def), color, color);
-		colors[i].color.alpha = 0xffff;
+		w.colors[i].color.alpha = 0xffff;
 	}
 
 	// Others
@@ -327,6 +346,7 @@ static void load_resources() {
 	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
 }
 
+// Connect to the X server and set up our windows (gritty X11 stuff)
 static void x_init(void)
 {
 	if (!(w.disp = XOpenDisplay(0))) {
@@ -366,8 +386,8 @@ static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point p
 	bool bold = (rune.attr & ATTR_BOLD) != 0;
 	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = w.font[bold + 2 * italic];
-	XftColor fg = colors[rune.fg || !term.reverse_video ? rune.fg : 15];
-	XftColor bg = colors[rune.bg ||  term.reverse_video ? rune.bg : 15];
+	XftColor fg = w.colors[rune.fg || !term.reverse_video ? rune.fg : 15];
+	XftColor bg = w.colors[rune.bg ||  term.reverse_video ? rune.bg : 15];
 	int baseline = y + font->ascent;
 
 	if (rune.attr & ATTR_INVISIBLE) {
@@ -432,6 +452,7 @@ static void draw_rune(Point pos)
 		prev_pos = pos;
 	}
 
+	// Pick an appropriate rendition: NUL becomes space, invalid UTF-8 becomes ⁇
 	if (*rune.u < 0x80) {
 		buf[len++] = MAX(*rune.u, ' ');
 	} else if (*rune.u >= 0xC0 && strnlen((char*) rune.u, 4) == UTF_LEN(*rune.u)) {
@@ -443,7 +464,7 @@ static void draw_rune(Point pos)
 	}
 }
 
-// Redraws all runes on our buffer, then flushes it to the window.
+// Update the display
 static void draw(void)
 {
 	for (Point pos = { 0, 0 }; pos.y < pty.rows; ++pos.y)
@@ -452,6 +473,7 @@ static void draw(void)
 	XFlush(w.disp);
 }
 
+// Print the escape sequence for special key `c`, with modifiers `state`
 static void special_key(u8 c, int state)
 {
 	if (state && c < 'A')
@@ -461,9 +483,10 @@ static void special_key(u8 c, int state)
 	else if (c < 'A')
 		dprintf(pty.fd, "\033[%d~", c);
 	else
-		dprintf(pty.fd, "\033%c%c", term.appcursor ? 'O' : '[', c);
+		dprintf(pty.fd, "\033%c%c", term.app_keys ? 'O' : '[', c);
 }
 
+// Handle keyboard shortcuts, or print the pressed key to the pty
 static void on_keypress(XKeyEvent *e)
 {
 	static const u8 codes[] = {
@@ -508,21 +531,22 @@ static void on_keypress(XKeyEvent *e)
 		write(pty.fd, buf, len);
 }
 
+// Recompute the number of text rows/columns
 static void on_resize(XConfigureEvent *e)
 {
-	static int old_width, old_height;
-	if (e->width == old_width && e->height == old_height)
+	Point old_size = { pty.cols, pty.rows };
+	Point new_size = pixel2cell(e->width - 2 * w.border, e->height - 2 * w.border);
+
+	if (POINT_EQ(old_size, new_size))
 		return;
-	old_width = e->width;
-	old_height = e->height;
 
 	// Update terminal info
-	Point pty_size = pixel2cell(e->width - 2 * w.border, e->height - 2 * w.border);
-	pty.cols = MIN((u16) pty_size.x, LINE_SIZE - 1);
-	pty.rows = MIN((u16) pty_size.y, HIST_SIZE / 2);
+	pty.cols = MIN((u16) new_size.x, LINE_SIZE - 1);
+	pty.rows = MIN((u16) new_size.y, HIST_SIZE / 2);
 	term.top = 0;
 	term.bot = pty.rows - 1;
 	move_to(cursor.x, cursor.y);
+	dirty_everything();
 
 	// Send our size to the pty driver so that applications can query it
 	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
@@ -530,6 +554,7 @@ static void on_resize(XConfigureEvent *e)
 		perror("Couldn't set window size");
 }
 
+// Load the new X resources if they changed
 static void on_property_change(XPropertyEvent *e)
 {
 	static XrmDatabase xrm;
@@ -543,7 +568,7 @@ static void on_property_change(XPropertyEvent *e)
 			&ignored.atom, &ignored.i, &ignored.ul, &ignored.ul, &xprop);
 
 	if (xrm)
-		XrmDestroyDatabase(xrm);
+		XrmDestroyDatabase(XrmGetDatabase(w.disp));
 	xrm = XrmGetStringDatabase((char*) xprop);
 	XrmSetDatabase(w.disp, xrm);
 	XFree(xprop);
@@ -552,6 +577,7 @@ static void on_property_change(XPropertyEvent *e)
 	dirty_everything();
 }
 
+// Handle selection, middle-click paste, and scrolling with the wheel
 static void on_mouse(XButtonEvent *e)
 {
 	static Point prev;
@@ -598,7 +624,8 @@ static void on_mouse(XButtonEvent *e)
 	}
 }
 
-static void handle_xevent(XEvent * e)
+// Delegate to the appropriate event handler, depending on the event’s type
+static void dispatch_event(XEvent * e)
 {
 	switch (e->type) {
 	case KeyPress:
@@ -611,7 +638,6 @@ static void handle_xevent(XEvent * e)
 		break;
 	case ConfigureNotify:
 		on_resize((XConfigureEvent*) e);
-		dirty_everything();
 		break;
 	case PropertyNotify:
 		on_property_change((XPropertyEvent*) e);
@@ -628,19 +654,7 @@ static void handle_xevent(XEvent * e)
 	}
 }
 
-static u8 pty_getchar(void)
-{
-	if (pty.c >= pty.end) {
-		pty.c = pty.buf;
-		long result = read(pty.fd, pty.buf, BUFSIZ);
-		if (result < 0)
-			clean_exit(w.disp);
-		pty.end = pty.buf + result;
-	}
-
-	return *pty.c++;
-}
-
+// Fork and initialize the pty
 static void pty_new(char* cmd[])
 {
 	switch (forkpty(&pty.fd, 0, 0, 0)) {
@@ -653,6 +667,20 @@ static void pty_new(char* cmd[])
 	default:
 		signal(SIGCHLD, SIG_IGN);
 	}
+}
+
+// Read one character from the pty, blocking if necessary
+static u8 pty_getchar(void)
+{
+	if (pty.c >= pty.end) {
+		pty.c = pty.buf;
+		long result = read(pty.fd, pty.buf, BUFSIZ);
+		if (result < 0)
+			clean_exit(w.disp);
+		pty.end = pty.buf + result;
+	}
+
+	return *pty.c++;
 }
 
 static void reset()
@@ -706,7 +734,7 @@ static void set_mode(bool set, int mode)
 {
 	switch (mode) {
 	case 1:    // DECCKM — Application cursor keys
-		term.appcursor = set;
+		term.app_keys = set;
 		break;
 	case 5:    // DECSCNM — Reverse video
 		term.reverse_video = set;
@@ -721,7 +749,7 @@ static void set_mode(bool set, int mode)
 		term.lines += (set - term.alt) * pty.rows;
 		term.scroll = term.lines;
 		if (set)
-			erase_lines(0, pty.rows - 1);
+			erase_lines(0, pty.rows);
 		else
 			cursor = saved_cursors[0];
 		saved_cursors[term.alt] = cursor;
@@ -795,10 +823,10 @@ next_csi_byte:
 		move_to(((cursor.x >> 3) + MAX(*arg, 1)) << 3, cursor.y);
 		break;
 	case 'J': // ED — Erase display
-		erase_lines(*arg ? 0 : cursor.y + 1, (*arg == 1 ? cursor.y : pty.rows) - 1);
+		erase_lines(*arg ? 0 : cursor.y + 1, *arg == 1 ? cursor.y : pty.rows);
 		// FALLTHROUGH
 	case 'K': // EL — Erase line
-		erase_chars(*arg ? 0 : cursor.x, *arg == 1 ? cursor.x : pty.cols);
+		erase_chars(*arg ? 0 : cursor.x, *arg == 1 ? cursor.x + 1 : pty.cols);
 		break;
 	case 'L': // IL — Insert <n> blank lines
 	case 'M': // DL — Delete <n> lines
@@ -812,13 +840,13 @@ next_csi_byte:
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		Rune *dest = TLINE(cursor.y) + cursor.x;
 		memmove(dest, dest + *arg, (pty.cols - cursor.x - *arg) * sizeof(Rune));
-		erase_chars(pty.cols - *arg, pty.cols - 1);
+		erase_chars(pty.cols - *arg, pty.cols);
 		break;
 	case '@': // ICH — Insert <n> blank chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		Rune *src = TLINE(cursor.y) + cursor.x;
 		memmove(src + *arg, src, (pty.cols - cursor.x - *arg) * sizeof(Rune));
-		erase_chars(cursor.x, cursor.x + *arg - 1);
+		erase_chars(cursor.x, cursor.x + *arg);
 		break;
 	case 'S': // SU — Scroll <n> lines up
 	case 'T': // SD — Scroll <n> lines down
@@ -827,7 +855,7 @@ next_csi_byte:
 		break;
 	case 'X': // ECH — Erase <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
-		erase_chars(cursor.x, cursor.x + *arg - 1);
+		erase_chars(cursor.x, cursor.x + *arg);
 		break;
 	case 'Z': // CBT — Cursor backward <n> tabulation stops
 		move_to(((cursor.x >> 3) - MAX(*arg, 1)) << 3, cursor.y);
@@ -985,7 +1013,7 @@ static void run(fd_set read_fds)
 	XEvent e;
 	while (XPending(w.disp)) {
 		XNextEvent(w.disp, &e);
-		handle_xevent(&e);
+		dispatch_event(&e);
 	}
 
 	timeout.tv_usec = MIN(timeout.tv_usec - 50, 20000);

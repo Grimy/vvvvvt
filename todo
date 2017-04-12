@@ -5,8 +5,8 @@
 * set colors 232 — 255 as gradient from 0 → 15?
 * add bg/fg colors separate from 0 and 15?
 * do something about selection and scrolling
-* make sure the child window is always the same size as the parent
 * avoid writing to [pty.cols]
 * fix selection around newlines
 * make border color configurable
 * either fix or remove \e[?5h (reverse video)
+* refactor: ATTR_DIRTY might not be needed

@@ -10,3 +10,12 @@ Clearing a line sets the background color (required by htop):
 
 Partial line clears:
 ******************************[10D[0K[10D[1K
+
+CSI P (delete chars):
+abcdefghijklmnopqrstuvwxyz[999P[20D[10P
+
+CSI @ (insert blanks):
+abcdefghijklmnopqrstuvwxyz[999@[20D[10@
+
+CSI X (erase chars):
+abcdefghijklmnopqrstuvwxyz[999X[20D[10X
