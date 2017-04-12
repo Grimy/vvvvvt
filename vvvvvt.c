@@ -837,16 +837,15 @@ next_csi_byte:
 		}
 		break;
 	case 'P': // DCH — Delete <n> chars
-		LIMIT(*arg, 1, pty.cols - cursor.x);
-		Rune *dest = TLINE(cursor.y) + cursor.x;
-		memmove(dest, dest + *arg, (pty.cols - cursor.x - *arg) * sizeof(Rune));
-		erase_chars(pty.cols - *arg, pty.cols);
-		break;
 	case '@': // ICH — Insert <n> blank chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
-		Rune *src = TLINE(cursor.y) + cursor.x;
-		memmove(src + *arg, src, (pty.cols - cursor.x - *arg) * sizeof(Rune));
-		erase_chars(cursor.x, cursor.x + *arg);
+		LIMIT(cursor.x, 0, pty.cols - 1);
+		Rune *base = TLINE(cursor.y) + cursor.x;
+		Rune *dst = base + (command == 'P' ? 0 : *arg);
+		Rune *src = base + (command == 'P' ? *arg : 0);
+		int erase = command == 'P' ? pty.cols - *arg : cursor.x;
+		memmove(dst, src, (pty.cols - cursor.x - *arg) * sizeof(Rune));
+		erase_chars(erase, erase + *arg);
 		break;
 	case 'S': // SU — Scroll <n> lines up
 	case 'T': // SD — Scroll <n> lines down

@@ -12,7 +12,7 @@ Partial line clears:
 ******************************[10D[0K[10D[1K
 
 CSI P (delete chars):
-abcdefghijklmnopqrstuvwxyz[999P[20D[10P
+abcdefghijklmnopqrstuvwxyz[999P[999C#[6G[10P
 
 CSI @ (insert blanks):
 abcdefghijklmnopqrstuvwxyz[999@[20D[10@
