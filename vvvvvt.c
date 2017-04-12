@@ -196,8 +196,8 @@ static void scroll(int n)
 // Get the text coordinates corresponding to the given pixel coordinates
 static Point pixel2cell(int px, int py)
 {
-	int x = px / w.font_width;
-	int y = py / w.font_height;
+	int x = (px - w.border) / w.font_width;
+	int y = (py - w.border) / w.font_height;
 	return (Point) { MAX(x, 0), MAX(y, 0) };
 }
 
@@ -217,7 +217,7 @@ static void copy(bool clipboard)
 
 		for (int x = xstart; x < xend; ++x)
 			fprintf(pipe, "%.4s", line[x].u);
-		if (xend == pty.cols)
+		if (xend == pty.cols && !line[pty.cols - 1].u[0])
 			fprintf(pipe, "\n");
 	}
 
@@ -368,12 +368,12 @@ static void x_init(void)
 
 	Window parent = XCreateSimpleWindow(w.disp, root, 0, 0, width, height, 0, None, None);
 	XDefineCursor(w.disp, parent, XCreateFontCursor(w.disp, XC_xterm));
-	XSelectInput(w.disp, parent, FocusChangeMask | StructureNotifyMask | KeyPressMask);
+	XSelectInput(w.disp, parent, ExposureMask | FocusChangeMask | StructureNotifyMask
+			| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask);
 	XStoreName(w.disp, parent, "vvvvvt");
 	XMapWindow(w.disp, parent);
 
 	Window win = XCreateSimpleWindow(w.disp, parent, w.border, w.border, ~0u, ~0u, 0, None, None);
-	XSelectInput(w.disp, win, ExposureMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask);
 	XMapWindow(w.disp, win);
 	w.draw = XftDrawCreate(w.disp, win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 }
@@ -535,7 +535,7 @@ static void on_keypress(XKeyEvent *e)
 static void on_resize(XConfigureEvent *e)
 {
 	Point old_size = { pty.cols, pty.rows };
-	Point new_size = pixel2cell(e->width - 2 * w.border, e->height - 2 * w.border);
+	Point new_size = pixel2cell(e->width - w.border, e->height - w.border);
 
 	if (POINT_EQ(old_size, new_size))
 		return;
@@ -1016,7 +1016,7 @@ static void run(fd_set read_fds)
 		dispatch_event(&e);
 	}
 
-	timeout.tv_usec = MIN(timeout.tv_usec - 50, 20000);
+	timeout.tv_usec = MIN(timeout.tv_usec - 60, 16680);
 	if (timeout.tv_usec <= 0) {
 		draw();
 		timeout.tv_usec = 999999;
