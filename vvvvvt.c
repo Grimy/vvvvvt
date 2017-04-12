@@ -38,7 +38,7 @@
 #define SLINE(y)            (term.hist[(y) % HIST_SIZE])
 #define TLINE(y)            (SLINE((y) + term.scroll))
 #define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
-#define clear_selection()   (sel.ne.y = -1)
+#define clear_selection()   (sel.end.y = -1)
 #define dirty_everything()  (memset(old_runes, 255, sizeof(old_runes)))
 
 #define die(message)        do { perror(message); clean_exit(w.disp); } while (0)
@@ -86,10 +86,10 @@ static struct {
 } cursor, saved_cursors[2];
 
 static struct {
-	int snap; // snapping mode
-	Point ob; // coordinates of the point clicked to start the selection
-	Point nb; // coordinates of the beginning of the selection (inclusive)
-	Point ne; // coordinates of the end of the selection (exclusive)
+	int snap;    // snapping mode
+	Point mark;  // coordinates of the point clicked to start the selection
+	Point start; // coordinates of the beginning of the selection (inclusive)
+	Point end;   // coordinates of the end of the selection (exclusive)
 } sel;
 
 static struct {
@@ -134,7 +134,7 @@ static Rune old_runes[128][LINE_SIZE];
 // Set all characters between lines `first` and `end` (inclusive) to the erased state
 static void erase_lines(int first, int last)
 {
-	if (sel.nb.y <= last + term.scroll && sel.ne.y >= first + term.scroll)
+	if (sel.start.y <= last + term.scroll && sel.end.y >= first + term.scroll)
 		clear_selection();
 	for (int y = first; y <= last; y++)
 		memset(TLINE(y), 0, sizeof(TLINE(y)));
@@ -195,15 +195,15 @@ static Point pixel2cell(int px, int py)
 static void copy(bool clipboard)
 {
 	// If the selection is empty, leave the clipboard as-is rather than emptying it
-	if (!POINT_GT(sel.ne, sel.nb))
+	if (!POINT_GT(sel.end, sel.start))
 		return;
 
 	FILE* pipe = popen(clipboard ? "xsel -bi" : "xsel -i", "w");
 
-	for (int y = sel.nb.y; y <= sel.ne.y; y++) {
+	for (int y = sel.start.y; y <= sel.end.y; y++) {
 		Rune *line = SLINE(y);
-		int xstart = y == sel.nb.y ? sel.nb.x : 0;
-		int xend = y == sel.ne.y ? sel.ne.x : pty.cols;
+		int xstart = y == sel.start.y ? sel.start.x : 0;
+		int xend = y == sel.end.y ? sel.end.x : pty.cols;
 
 		for (int x = xstart; x < xend; ++x)
 			fprintf(pipe, "%.4s", line[x].u);
@@ -232,29 +232,29 @@ static void paste(bool clipboard)
 	pclose(pipe);
 }
 
-static void selnormalize(Point oe)
+static void sel_set_point(Point point)
 {
-	bool swapped = POINT_GT(sel.ob, oe);
-	sel.nb = swapped ? oe : sel.ob;
-	sel.ne = swapped ? sel.ob : oe;
+	bool swapped = POINT_GT(sel.mark, point);
+	sel.start = swapped ? point : sel.mark;
+	sel.end = swapped ? sel.mark : point;
 
 	if (sel.snap == SNAP_LINE) {
-		sel.nb.x = 0;
-		sel.ne.x = pty.cols;
+		sel.start.x = 0;
+		sel.end.x = pty.cols;
 	} else if (sel.snap == SNAP_WORD) {
-		while (sel.nb.x > 0 && !IS_DELIM(SLINE(sel.nb.y)[sel.nb.x - 1].u))
-			--sel.nb.x;
-		while (!IS_DELIM(SLINE(sel.ne.y)[sel.ne.x].u))
-			++sel.ne.x;
+		while (sel.start.x > 0 && !IS_DELIM(SLINE(sel.start.y)[sel.start.x - 1].u))
+			--sel.start.x;
+		while (!IS_DELIM(SLINE(sel.end.y)[sel.end.x].u))
+			++sel.end.x;
 	}
 }
 
 static bool selected(int x, int y)
 {
 	y += term.scroll;
-	return BETWEEN(y, sel.nb.y, sel.ne.y)
-		&& (y != sel.nb.y || x >= sel.nb.x)
-		&& (y != sel.ne.y || x <  sel.ne.x);
+	return BETWEEN(y, sel.start.y, sel.end.y)
+		&& (y != sel.start.y || x >= sel.start.x)
+		&& (y != sel.end.y || x < sel.end.x);
 }
 
 static int __attribute__((noreturn)) clean_exit(Display *disp)
@@ -563,8 +563,8 @@ static void on_mouse(XButtonEvent *e)
 		return;
 	prev = pos;
 
-	if (term.report_buttons && (button || term.report_motion) && e->state != ShiftMask) {
-		if (pos.x <= 222 && pos.y <= 222)
+	if (term.report_buttons && !(e->state & ShiftMask)) {
+		if ((button || term.report_motion) && pos.x <= 222 && pos.y <= 222)
 			dprintf(pty.fd, "\033[M%c%c%c", 31 + button, 33 + pos.x, 33 + pos.y);
 		return;
 	}
@@ -572,19 +572,19 @@ static void on_mouse(XButtonEvent *e)
 	switch (button) {
 	case 0:  // Cursor movement
 		if (e->state & (Button1Mask | Button3Mask))
-			selnormalize(pos);
+			sel_set_point(pos);
 		break;
 	case 1:  // Left click
-		sel.snap = POINT_EQ(pos, sel.ob) * sel.snap + 1 & 3;
-		sel.ob = pos;
-		selnormalize(pos);
+		sel.snap = POINT_EQ(pos, sel.mark) * sel.snap + 1 & 3;
+		sel.mark = pos;
+		sel_set_point(pos);
 		break;
 	case 2:  // Middle click
 		paste(false);
 		break;
 	case 3:  // Right click
 		sel.snap = SNAP_LINE;
-		selnormalize(pos);
+		sel_set_point(pos);
 		break;
 	case 4:  // Any button released
 		copy(false);
