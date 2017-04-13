@@ -4,7 +4,6 @@
 * more tests
 * set colors 232 — 255 as gradient from 0 → 15?
 * add bg/fg colors separate from 0 and 15?
-* do something about selection and scrolling
 * make border color configurable
 * either fix or remove \e[?5h (reverse video)
 * handle default colors one level higher to avoid w.dirty = true in set_mode

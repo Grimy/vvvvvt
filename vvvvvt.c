@@ -36,9 +36,9 @@
 #define POINT_EQ(a, b)      ((a).x == (b).x && (a).y == (b).y)
 #define POINT_GT(a, b)      ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define SLINE(y)            (term.hist[(y) % HIST_SIZE])
-#define TLINE(y)            (SLINE((y) + term.scroll))
+#define LINE(y)             (SLINE((y) + term.scroll))
 #define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
-#define clear_selection()   (sel.end.y = -1)
+#define clear_selection()   (sel.end = sel.start)
 
 #define die(message)        do { perror(message); clean_exit(w.disp); } while (0)
 
@@ -137,19 +137,27 @@ static struct {
 	bool focused;
 } w;
 
+// Is the character at row `y`, column `x` currently selected?
+static bool selected(int x, int y)
+{
+	return BETWEEN(y, sel.start.y, sel.end.y)
+		&& (y != sel.start.y || x >= sel.start.x)
+		&& (y != sel.end.y || x < sel.end.x);
+}
+
 // Erase all characters between lines `start` and `end` (exclusive)
 static void erase_lines(int start, int end)
 {
-	if (sel.start.y < end + term.scroll && sel.end.y >= start + term.scroll)
+	if (sel.start.y < end && sel.end.y >= start)
 		clear_selection();
 	for (int y = start; y < end; y++)
-		memset(TLINE(y), 0, sizeof(TLINE(y)));
+		memset(LINE(y), 0, sizeof(LINE(y)));
 }
 
 // Erase characters between columns `start` and `end` in the current line
 static void erase_chars(int start, int end)
 {
-	Rune *line = TLINE(cursor.y);
+	Rune *line = LINE(cursor.y);
 	for (int x = start; x < end; ++x)
 		line[x] = (Rune) { "", 0, 0, cursor.rune.bg };
 }
@@ -157,12 +165,17 @@ static void erase_chars(int start, int end)
 // Move lines between `start` and `end` by `diff` rows down
 static void move_lines(int start, int end, int diff)
 {
+	if (sel.start.y >= start && sel.end.y < end) {
+		sel.start.y -= diff;
+		sel.end.y -= diff;
+	}
+
 	int step = diff < 0 ? -1 : 1;
 	if (diff < 0)
 		SWAP(start, end);
 	int last = end - diff + step;
 	for (int y = start; y != last; y += step)
-		memcpy(TLINE(y), TLINE(y + diff), sizeof(TLINE(y)));
+		memcpy(LINE(y), LINE(y + diff), sizeof(LINE(y)));
 	erase_lines(MIN(last, end), MAX(last, end) + 1);
 }
 
@@ -171,6 +184,17 @@ static void move_to(int x, int y)
 {
 	cursor.x = LIMIT(x, 0, pty.cols - 1);
 	cursor.y = LIMIT(y, 0, pty.rows - 1);
+}
+
+// Scroll the viewport `n` lines down (n < 0: scroll up)
+static void scroll(int n)
+{
+	int min_scroll = MAX(0, term.lines - HIST_SIZE + 2 * pty.rows);
+	LIMIT(n, min_scroll - term.scroll, term.lines - term.scroll);
+	term.scroll += n;
+	sel.mark.y -= n;
+	sel.start.y -= n;
+	sel.end.y -= n;
 }
 
 // Move the cursor to the next line, scrolling if necessary
@@ -182,17 +206,10 @@ static void newline()
 		move_lines(term.top, term.bot, 1);
 	} else {
 		++term.lines;
-		++term.scroll;
+		scroll(1);
 		move_lines(term.bot, pty.rows - 1, -1);
 		erase_lines(2 * pty.rows - 1, 2 * pty.rows);
 	}
-}
-
-// Scroll the viewport `n` lines down (n < 0: scroll up)
-static void scroll(int n)
-{
-	term.scroll += n;
-	LIMIT(term.scroll, MAX(0, term.lines - HIST_SIZE + 2 * pty.rows), term.lines);
 }
 
 // Get the text coordinates corresponding to the given pixel coordinates
@@ -213,7 +230,7 @@ static void copy(bool clipboard)
 	FILE* pipe = popen(clipboard ? "xsel -bi" : "xsel -i", "w");
 
 	for (int y = sel.start.y; y <= sel.end.y; y++) {
-		Rune *line = SLINE(y);
+		Rune *line = LINE(y);
 		int xstart = y == sel.start.y ? sel.start.x : 0;
 		int xend = y == sel.end.y ? sel.end.x : pty.cols;
 
@@ -258,20 +275,11 @@ static void sel_set_point(Point point)
 		sel.start.x = 0;
 		sel.end.x = pty.cols;
 	} else if (sel.snap == SNAP_WORD) {
-		while (sel.start.x > 0 && !IS_DELIM(SLINE(sel.start.y)[sel.start.x - 1].u))
+		while (sel.start.x > 0 && !IS_DELIM(LINE(sel.start.y)[sel.start.x - 1].u))
 			--sel.start.x;
-		while (!IS_DELIM(SLINE(sel.end.y)[sel.end.x].u))
+		while (!IS_DELIM(LINE(sel.end.y)[sel.end.x].u))
 			++sel.end.x;
 	}
-}
-
-// Is the character at row `y`, column `x` currently selected?
-static bool selected(int x, int y)
-{
-	y += term.scroll;
-	return BETWEEN(y, sel.start.y, sel.end.y)
-		&& (y != sel.start.y || x >= sel.start.x)
-		&& (y != sel.end.y || x < sel.end.x);
 }
 
 // Keep Valgrind from complaining
@@ -432,7 +440,7 @@ static void draw_rune(Point pos)
 	static Rune prev;
 	static Point prev_pos;
 
-	Rune rune = TLINE(pos.y)[pos.x];
+	Rune rune = LINE(pos.y)[pos.x];
 	Rune *old_rune = &SLINE(pos.y + term.lines + pty.rows)[pos.x];
 
 	// Handle selection and cursor
@@ -601,7 +609,6 @@ static void on_mouse(XButtonEvent *e)
 	static Point prev;
 	int button = e->type == ButtonRelease ? 4 : e->button + (e->button >= Button4 ? 61 : 0);
 	Point pos = pixel2cell(e->x, e->y);
-	pos.y += term.scroll;
 
 	if ((e->state & Mod4Mask) || (!button && POINT_EQ(pos, prev)))
 		return;
@@ -857,7 +864,7 @@ next_csi_byte:
 	case '@': // ICH — Insert <n> blank chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		LIMIT(cursor.x, 0, pty.cols - 1);
-		Rune *base = TLINE(cursor.y) + cursor.x;
+		Rune *base = LINE(cursor.y) + cursor.x;
 		Rune *dst = base + (command == 'P' ? 0 : *arg);
 		Rune *src = base + (command == 'P' ? *arg : 0);
 		int erase = command == 'P' ? pty.cols - *arg : cursor.x;
@@ -996,7 +1003,7 @@ invalid_utf8:
 		}
 
 		cursor.rune.u[0] = u;
-		Rune *rune = &TLINE(cursor.y)[cursor.x];
+		Rune *rune = &LINE(cursor.y)[cursor.x];
 		*rune = cursor.rune;
 		++cursor.x;
 
@@ -1019,8 +1026,8 @@ static void run(fd_set read_fds)
 	if (select(pty.fd + 1, &read_fds, 0, 0, &timeout) < 0)
 		die("select failed");
 
-	if (FD_ISSET(pty.fd, &read_fds) && pty.rows) {
-		term.scroll = term.lines;
+	if (FD_ISSET(pty.fd, &read_fds)) {
+		scroll(term.lines - term.scroll);
 		pty_putchar(pty_getchar());
 		while (pty.c < pty.end)
 			pty_putchar(*pty.c++);
