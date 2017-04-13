@@ -336,8 +336,32 @@ static const char* get_resource(const char* resource, const char* fallback)
 	return result ? result : fallback;
 }
 
+// Recompute the number of text rows/columns from the given pixel dimensions
+static void fix_pty_size(int width, int height)
+{
+	Point old_size = { pty.cols, pty.rows };
+	Point new_size = pixel2cell(width - w.border, height - w.border);
+	if (POINT_EQ(old_size, new_size))
+		return;
+
+	pty.cols = LIMIT(new_size.x, 1, LINE_SIZE - 1);
+	pty.rows = LIMIT(new_size.y, 1, HIST_SIZE / 2);
+	term.top = 0;
+	term.bot = pty.rows - 1;
+	move_to(cursor.x, cursor.y);
+
+	// Send our size to the pty driver so that applications can query it
+	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
+	if (ioctl(pty.fd, TIOCSWINSZ, &size) < 0)
+		perror("Couldn't set window size");
+
+	// Resize the inner window to align it with the character grid
+	XResizeWindow(w.disp, w.win, pty.cols * w.font_width, pty.rows * w.font_height);
+}
+
 // Read the X resources used for configuration and take action accordingly
-static void load_resources() {
+static void load_resources()
+{
 	// Fonts
 	const char *face_name = get_resource("faceName", "mono");
 	const char *style[] = { "", "bold", "italic", "bold italic" };
@@ -370,11 +394,10 @@ static void load_resources() {
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
 	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
 
-	u32 width = pty.cols * w.font_width;
-	u32 height = pty.rows * w.font_height;
 	XMoveWindow(w.disp, w.win, w.border, w.border);
-	XResizeWindow(w.disp, w.win, width, height);
-	XResizeWindow(w.disp, w.parent, width + 2 * w.border, height + 2 * w.border);
+	XWindowAttributes attrs;
+	XGetWindowAttributes(w.disp, w.parent, &attrs);
+	fix_pty_size(attrs.width, attrs.height);
 }
 
 // Connect to the X server and set up our windows (gritty X11 stuff)
@@ -392,7 +415,7 @@ static void x_init(void)
 	Window root = XRootWindow(w.disp, DefaultScreen(w.disp));
 	XSelectInput(w.disp, root, PropertyChangeMask);
 
-	w.parent = XCreateSimpleWindow(w.disp, root, 0, 0, 640, 480, 0, None, None);
+	w.parent = XCreateSimpleWindow(w.disp, root, 0, 0, 1, 1, 0, None, None);
 	XDefineCursor(w.disp, w.parent, XCreateFontCursor(w.disp, XC_xterm));
 	XSelectInput(w.disp, w.parent, ExposureMask | FocusChangeMask | StructureNotifyMask
 			| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask);
@@ -405,6 +428,7 @@ static void x_init(void)
 	w.draw = XftDrawCreate(w.disp, w.win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
 	load_resources();
+	XResizeWindow(w.disp, w.parent, 80 * w.font_width + 2 * w.border, 24 * w.font_height + 2 * w.border);
 	XSetIOErrorHandler(clean_exit);
 }
 
@@ -570,30 +594,6 @@ static void on_keypress(XKeyEvent *e)
 		write(pty.fd, buf, len);
 }
 
-// Recompute the number of text rows/columns
-static void on_resize(XConfigureEvent *e)
-{
-	Point old_size = { pty.cols, pty.rows };
-	Point new_size = pixel2cell(e->width - w.border, e->height - w.border);
-
-	if (POINT_EQ(old_size, new_size))
-		return;
-
-	// Update terminal info
-	pty.cols = LIMIT(new_size.x, 1, LINE_SIZE - 1);
-	pty.rows = LIMIT(new_size.y, 1, HIST_SIZE / 2);
-	term.top = 0;
-	term.bot = pty.rows - 1;
-	move_to(cursor.x, cursor.y);
-
-	XResizeWindow(w.disp, w.win, pty.cols * w.font_width, pty.rows * w.font_height);
-
-	// Send our size to the pty driver so that applications can query it
-	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
-	if (ioctl(pty.fd, TIOCSWINSZ, &size) < 0)
-		perror("Couldn't set window size");
-}
-
 // Load the new X resources if they changed
 static void on_property_change(XPropertyEvent *e)
 {
@@ -676,7 +676,7 @@ static void dispatch_event(XEvent * e)
 		on_mouse((XButtonEvent*) e);
 		break;
 	case ConfigureNotify:
-		on_resize((XConfigureEvent*) e);
+		fix_pty_size(((XConfigureEvent*) e)->width, ((XConfigureEvent*) e)->height);
 		break;
 	case PropertyNotify:
 		on_property_change((XPropertyEvent*) e);
@@ -1057,8 +1057,6 @@ static void run(fd_set read_fds)
 
 int main(int argc, char *argv[])
 {
-	pty.rows = 24;
-	pty.cols = 80;
 	x_init();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 

@@ -7,4 +7,3 @@
 * make border color configurable
 * either fix or remove \e[?5h (reverse video)
 * handle default colors one level higher to avoid w.dirty = true in set_mode
-* load_resources should set pty size instead of resizing windows
