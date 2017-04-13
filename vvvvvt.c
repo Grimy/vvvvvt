@@ -398,7 +398,6 @@ static void load_resources()
 	w.border = atoi(get_resource("internalBorder", "2"));
 	XMoveWindow(w.disp, w.win, w.border, w.border);
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
-	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
 }
 
 // Connect to the X server and set up our windows (gritty X11 stuff)
@@ -442,8 +441,8 @@ static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point p
 	bool bold = (rune.attr & ATTR_BOLD) != 0;
 	bool italic = (rune.attr & (ATTR_ITALIC | ATTR_BLINK)) != 0;
 	XftFont *font = w.font[bold + 2 * italic];
-	XftColor fg = w.colors[rune.fg || !term.reverse_video ? rune.fg : 15];
-	XftColor bg = w.colors[rune.bg ||  term.reverse_video ? rune.bg : 15];
+	XftColor fg = w.colors[rune.fg];
+	XftColor bg = w.colors[rune.bg];
 	int baseline = y + font->ascent;
 
 	if (rune.attr & ATTR_INVISIBLE) {
@@ -482,6 +481,11 @@ static void draw_rune(Point pos)
 
 	Rune rune = LINE(pos.y)[pos.x];
 	Rune *old_rune = &SLINE(pos.y + term.lines + pty.rows)[pos.x];
+
+	// Default colors
+	u8 *defaulted = term.reverse_video ? &rune.bg : &rune.fg;
+	if (*defaulted == 0)
+		*defaulted = 15;
 
 	// Handle selection and cursor
 	if (pos.x != pty.cols && selected(pos.x, pos.y))
@@ -782,7 +786,6 @@ static void set_mode(bool set, int mode)
 		break;
 	case 5:    // DECSCNM — Reverse video
 		term.reverse_video = set;
-		w.dirty = true;
 		break;
 	case 25:   // DECTCEM — Show cursor
 		term.hide = !set;
