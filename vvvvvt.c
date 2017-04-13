@@ -353,7 +353,7 @@ static void fix_pty_size(int width, int height)
 	// Send our size to the pty driver so that applications can query it
 	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
 	if (ioctl(pty.fd, TIOCSWINSZ, &size) < 0)
-		perror("Couldn't set window size");
+		perror("Couldn't set pty size");
 
 	// Resize the inner window to align it with the character grid
 	XResizeWindow(w.disp, w.win, pty.cols * w.font_width, pty.rows * w.font_height);
@@ -366,6 +366,7 @@ static void load_resources()
 	const char *face_name = get_resource("faceName", "mono");
 	const char *style[] = { "", "bold", "italic", "bold italic" };
 	char font_name[128];
+
 	for (int i = 0; i < 4; ++i) {
 		sprintf(font_name, "%s:style=%s", face_name, style[i]);
 		if (w.font[i])
@@ -373,31 +374,31 @@ static void load_resources()
 		w.font[i] = XftFontOpenName(w.disp, w.screen, font_name);
 	}
 
-	// Colors
-	Colormap colormap = DefaultColormap(w.disp, w.screen);
-	char color_name[16] = "color";
-	char def[16] = "";
-	for (u16 i = 0; i < 256; ++i) {
-		sprintf(color_name + 5, "%d", i);
-		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
-		XColor *color = (XColor*) &w.colors[i];
-		XAllocNamedColor(w.disp, colormap, get_resource(color_name, def), color, color);
-		w.colors[i].color.alpha = 0xffff;
-	}
-	XSetWindowBackground(w.disp, w.parent, w.colors[4].pixel);
-
-	// Others
 	double scale_height = atof(get_resource("scaleHeight", "1"));
 	w.font_height = (int) ((w.font[0]->height + 1) * scale_height + .999);
 	w.font_width = w.font[0]->max_advance_width;
+
+	// Colors
+	Colormap colormap = DefaultColormap(w.disp, w.screen);
+	char resource_name[16] = "color";
+	char def[16] = "";
+	for (u16 i = 0; i < 256; ++i) {
+		sprintf(resource_name + 5, "%d", i);
+		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
+		XColor *color = (XColor*) &w.colors[i];
+		XLookupColor(w.disp, colormap, get_resource(resource_name, def), color, color);
+		w.colors[i].color.alpha = 0xffff;
+	}
+	XColor border_color;
+	XAllocNamedColor(w.disp, colormap, get_resource("borderColor", "#000000"), &border_color, &border_color);
+	XSetWindowBackground(w.disp, w.parent, border_color.pixel);
+	XClearWindow(w.disp, w.parent);
+
+	// Others
 	w.border = atoi(get_resource("internalBorder", "2"));
+	XMoveWindow(w.disp, w.win, w.border, w.border);
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
 	term.reverse_video = is_true(get_resource("reverseVideo", "on"));
-
-	XMoveWindow(w.disp, w.win, w.border, w.border);
-	XWindowAttributes attrs;
-	XGetWindowAttributes(w.disp, w.parent, &attrs);
-	fix_pty_size(attrs.width, attrs.height);
 }
 
 // Connect to the X server and set up our windows (gritty X11 stuff)
@@ -420,16 +421,17 @@ static void x_init(void)
 	XSelectInput(w.disp, w.parent, ExposureMask | FocusChangeMask | StructureNotifyMask
 			| KeyPressMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask);
 	XStoreName(w.disp, w.parent, "vvvvvt");
-	XMapWindow(w.disp, w.parent);
 
 	w.win = XCreateSimpleWindow(w.disp, w.parent, 0, 0, 1, 1, 0, None, None);
 	XChangeWindowAttributes(w.disp, w.win, CWBitGravity, &(XSetWindowAttributes) { .bit_gravity = NorthWestGravity });
-	XMapWindow(w.disp, w.win);
 	w.draw = XftDrawCreate(w.disp, w.win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
 	load_resources();
 	XResizeWindow(w.disp, w.parent, 80 * w.font_width + 2 * w.border, 24 * w.font_height + 2 * w.border);
 	XSetIOErrorHandler(clean_exit);
+
+	XMapWindow(w.disp, w.parent);
+	XMapWindow(w.disp, w.win);
 }
 
 static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point pos)
@@ -615,6 +617,10 @@ static void on_property_change(XPropertyEvent *e)
 
 	load_resources();
 	w.dirty = true;
+
+	XWindowAttributes attrs;
+	XGetWindowAttributes(w.disp, w.parent, &attrs);
+	fix_pty_size(attrs.width, attrs.height);
 }
 
 // Handle selection, middle-click paste, and scrolling with the wheel
@@ -787,7 +793,7 @@ static void set_mode(bool set, int mode)
 		term.lines += (set - term.alt) * pty.rows;
 		term.scroll = term.lines;
 		if (set)
-			erase_lines(0, pty.rows);
+			erase_lines(0, 2 * pty.rows);
 		else
 			cursor = saved_cursors[0];
 		saved_cursors[term.alt] = cursor;
