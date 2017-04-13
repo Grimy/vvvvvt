@@ -179,6 +179,20 @@ static void move_lines(int start, int end, int diff)
 	erase_lines(MIN(last, end), MAX(last, end) + 1);
 }
 
+// Move characters between columns `start` and `end` of the current line by `diff`
+static void move_chars(int start, int end, int diff)
+{
+	Rune *line = LINE(cursor.y);
+
+	int step = diff < 0 ? -1 : 1;
+	if (diff < 0)
+		SWAP(start, end);
+	int last = end - diff + step;
+	for (int x = start; x != last; x += step)
+		line[x] = line[x + diff];
+	erase_chars(MIN(last, end), MAX(last, end) + 1);
+}
+
 // Set the cursor position
 static void move_to(int x, int y)
 {
@@ -860,16 +874,11 @@ next_csi_byte:
 			cursor.x = 0;
 		}
 		break;
-	case 'P': // DCH — Delete <n> chars
 	case '@': // ICH — Insert <n> blank chars
+	case 'P': // DCH — Delete <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		LIMIT(cursor.x, 0, pty.cols - 1);
-		Rune *base = LINE(cursor.y) + cursor.x;
-		Rune *dst = base + (command == 'P' ? 0 : *arg);
-		Rune *src = base + (command == 'P' ? *arg : 0);
-		int erase = command == 'P' ? pty.cols - *arg : cursor.x;
-		memmove(dst, src, (pty.cols - cursor.x - *arg) * sizeof(Rune));
-		erase_chars(erase, erase + *arg);
+		move_chars(cursor.x, pty.cols, command == '@' ? -*arg : *arg);
 		break;
 	case 'S': // SU — Scroll <n> lines up
 	case 'T': // SD — Scroll <n> lines down
