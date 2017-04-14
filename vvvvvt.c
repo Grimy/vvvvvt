@@ -734,41 +734,54 @@ static void reset()
 	term.bot = pty.rows - 1;
 }
 
-static int set_attr(int *attr)
+static void set_attr(int **p)
 {
+	int attr = *(*p)++;
 	u8 *color = &cursor.rune.fg;
-	if (BETWEEN(*attr, 40, 49) || BETWEEN(*attr, 100, 107)) {
+	if (BETWEEN(attr, 40, 49) || BETWEEN(attr, 100, 107)) {
 		color = &cursor.rune.bg;
-		*attr -= 10;
+		attr -= 10;
 	}
 
-	switch (*attr) {
+	switch (attr) {
 	case 0:
 		memset(&cursor.rune, 0, sizeof(cursor.rune));
-		return 1;
+		break;
 	case 1 ... 9:
-		cursor.rune.attr |= 1 << *attr;
-		return 1;
-	case 21 ... 29:
-		cursor.rune.attr &= ~(1 << (*attr - 20));
-		return 1;
+		cursor.rune.attr |= 1 << attr;
+		break;
+	case 21:
+		cursor.rune.attr |= ATTR_UNDERLINE;
+		break;
+	case 22:
+		cursor.rune.attr &= ~(ATTR_BOLD | ATTR_FAINT);
+		break;
+	case 23 ... 29:
+		cursor.rune.attr &= ~(1 << (attr - 20));
+		break;
 	case 30:
 		*color = 232;
-		return 1;
+		break;
 	case 31 ... 37:
-		*color = (u8) (*attr - 30);
-		return 1;
+		*color = (u8) (attr - 30);
+		break;
 	case 38:
-		*color = (u8) attr[2];
-		return 3;
+		attr = *(*p)++;
+		if (attr == 2) {
+			int r = (*(*p)++ - 35) / 40;
+			int g = (*(*p)++ - 35) / 40;
+			int b = (*(*p)++ - 35) / 40;
+			*color = (u8) (16 + 36 * r + 6 * g + b);
+		} else if (attr == 5) {
+			*color = (u8) *(*p)++;
+		}
+		break;
 	case 39:
 		*color = 0;
-		return 1;
+		break;
 	case 90 ... 97:
-		*color = (u8) (*attr - 90 + 8);
-		return 1;
-	default:
-		return 1;
+		*color = (u8) (attr - 90 + 8);
+		break;
 	}
 }
 
@@ -825,8 +838,9 @@ next_csi_byte:
 		if (arg[nargs] < 10000)
 			arg[nargs] = 10 * arg[nargs] + command - '0';
 		goto next_csi_byte;
+	case ':':
 	case ';':
-		nargs = MIN(nargs + 1, LEN(arg) - 1);
+		nargs = MIN(nargs + 1, LEN(arg) - 3);
 		goto next_csi_byte;
 	case ' ' ... '/': // Intermediate bytes
 	case '<' ... '?': // Private parameter bytes
@@ -908,7 +922,7 @@ next_csi_byte:
 			set_mode(command == 'h', arg[i]);
 		break;
 	case 'm': // SGR — Select Graphic Rendition
-		for (u32 i = 0; i <= nargs; i += set_attr(arg + i));
+		for (int *p = arg; p <= arg + nargs; set_attr(&p));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 6)
@@ -966,19 +980,26 @@ static void handle_esc(u8 second_byte)
 		else
 			--cursor.y;
 		break;
+	case 'P': // DCS — Device Control String
+	case 'X': // SOS — Start of String
+	case ']': // OSC — Operating System Command
+	case '^': // PM — Privacy Message
+	case '_': // APC — Application Program Command
+		while (final_byte != '\033' && final_byte != '\a')
+			final_byte = pty_getchar();
+		if (final_byte == '\033')
+			handle_esc(pty_getchar());
+		break;
 	case '[': // CSI — Control Sequence Introducer
 		handle_csi();
-		break;
-	case ']': // OSC — Operating System Command
-		for (u8 c = 0; c != '\a' && (c != '\033' || pty_getchar() != '\\'); c = pty_getchar());
 		break;
 	case 'c': // RIS — Reset to inital state
 		memset(&term, 0, sizeof(term));
 		move_to(0, 0);
 		reset();
 		break;
-	case 'n':
-	case 'o':
+	case 'n': // Invoke the G2 character set
+	case 'o': // Invoke the G3 character set
 		term.charset = second_byte - 'n' + 2;
 		break;
 	}
