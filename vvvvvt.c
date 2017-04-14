@@ -38,8 +38,9 @@
 #define SLINE(y)            (term.hist[(y) % HIST_SIZE])
 #define LINE(y)             (SLINE((y) + term.scroll))
 #define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
-#define clear_selection()   (sel.end = sel.start)
 
+#define clear_selection()   (sel.end = sel.start)
+#define zeromem(x)          (memset(&(x), 0, sizeof(x)))
 #define die(message)        do { perror(message); clean_exit(w.disp); } while (0)
 
 typedef enum { false, true } bool;
@@ -58,8 +59,8 @@ enum {
 	ATTR_FAINT      = 1 << 2,
 	ATTR_ITALIC     = 1 << 3,
 	ATTR_UNDERLINE  = 1 << 4,
-	ATTR_BLINK      = 1 << 5,
-	ATTR_BLINK_FAST = 1 << 6,
+	ATTR_BLINK      = 1 << 5,  // rendered as italic
+	ATTR_BLINK_FAST = 1 << 6,  // not implemented
 	ATTR_REVERSE    = 1 << 7,
 	ATTR_INVISIBLE  = 1 << 8,
 	ATTR_STRUCK     = 1 << 9,
@@ -150,7 +151,7 @@ static void erase_lines(int start, int end)
 	if (sel.start.y < end && sel.end.y >= start)
 		clear_selection();
 	for (int y = start; y < end; y++)
-		memset(LINE(y), 0, sizeof(LINE(y)));
+		zeromem(LINE(y));
 }
 
 // Erase characters between columns `start` and `end` in the current line
@@ -297,6 +298,30 @@ static int __attribute__((noreturn)) clean_exit(Display *disp)
 	exit(0);
 }
 
+// Recompute the number of text rows/columns from the given pixel dimensions
+static void fix_pty_size(int width, int height)
+{
+	Point old_size = { pty.cols, pty.rows };
+	Point new_size = pixel2cell(width - w.border, height - w.border);
+	if (POINT_EQ(old_size, new_size))
+		return;
+
+	pty.cols = LIMIT(new_size.x, 1, LINE_SIZE - 1);
+	pty.rows = LIMIT(new_size.y, 1, HIST_SIZE / 2);
+	term.top = 0;
+	term.bot = pty.rows - 1;
+	move_to(cursor.x, cursor.y);
+
+	// Send our size to the pty driver so that applications can query it
+	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
+	if (ioctl(pty.fd, TIOCSWINSZ, &size) < 0)
+		perror("Couldn't set pty size");
+
+	// Resize the inner window to align it with the character grid
+	XResizeWindow(w.disp, w.win, pty.cols * w.font_width, pty.rows * w.font_height);
+}
+
+// Default value of component `rgb` (0=red, 1=green, 2=blue) of color `i`
 static u16 default_color(u16 i, int rgb)
 {
 	u16 theme[] = {
@@ -328,29 +353,6 @@ static const char* get_resource(const char* resource, const char* fallback)
 	return result ? result : fallback;
 }
 
-// Recompute the number of text rows/columns from the given pixel dimensions
-static void fix_pty_size(int width, int height)
-{
-	Point old_size = { pty.cols, pty.rows };
-	Point new_size = pixel2cell(width - w.border, height - w.border);
-	if (POINT_EQ(old_size, new_size))
-		return;
-
-	pty.cols = LIMIT(new_size.x, 1, LINE_SIZE - 1);
-	pty.rows = LIMIT(new_size.y, 1, HIST_SIZE / 2);
-	term.top = 0;
-	term.bot = pty.rows - 1;
-	move_to(cursor.x, cursor.y);
-
-	// Send our size to the pty driver so that applications can query it
-	struct winsize size = { (u16) pty.rows, (u16) pty.cols, 0, 0 };
-	if (ioctl(pty.fd, TIOCSWINSZ, &size) < 0)
-		perror("Couldn't set pty size");
-
-	// Resize the inner window to align it with the character grid
-	XResizeWindow(w.disp, w.win, pty.cols * w.font_width, pty.rows * w.font_height);
-}
-
 // Read the X resources used for configuration and take action accordingly
 static void load_resources()
 {
@@ -374,16 +376,17 @@ static void load_resources()
 	Colormap colormap = DefaultColormap(w.disp, w.screen);
 	char resource_name[16] = "color";
 	char def[16] = "";
+	XColor color;
+
 	for (u16 i = 0; i < 256; ++i) {
 		sprintf(resource_name + 5, "%d", i);
 		sprintf(def, "#%02x%02x%02x", default_color(i, 2), default_color(i, 1), default_color(i, 0));
-		XColor *color = (XColor*) &w.colors[i];
-		XLookupColor(w.disp, colormap, get_resource(resource_name, def), color, color);
-		w.colors[i].color.alpha = 0xffff;
+		XLookupColor(w.disp, colormap, get_resource(resource_name, def), &color, &color);
+		w.colors[i].color = (XRenderColor) { color.red, color.green, color.blue, 0xffff };
 	}
-	XColor border_color;
-	XAllocNamedColor(w.disp, colormap, get_resource("borderColor", "#000000"), &border_color, &border_color);
-	XSetWindowBackground(w.disp, w.parent, border_color.pixel);
+
+	XAllocNamedColor(w.disp, colormap, get_resource("borderColor", "#000"), &color, &color);
+	XSetWindowBackground(w.disp, w.parent, color.pixel);
 	XClearWindow(w.disp, w.parent);
 
 	// Others
@@ -425,6 +428,7 @@ static void x_init(void)
 	XMapWindow(w.disp, w.win);
 }
 
+// Draw the given text on screen
 static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point pos)
 {
 	int x = pos.x * w.font_width;
@@ -463,7 +467,7 @@ static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point p
 		XftDrawRect(w.draw, &fg, x, y, 2, w.font_height);
 }
 
-// Draws the rune at the given terminal coordinates.
+// Check the cell at position `pos`, redraw it if necessary
 static void draw_rune(Point pos)
 {
 	static u8 buf[4 * LINE_SIZE];
@@ -479,7 +483,7 @@ static void draw_rune(Point pos)
 	if (*defaulted == 0)
 		*defaulted = 15;
 
-	// Handle selection and cursor
+	// Add special attributes to render the selection and cursor
 	if (pos.x != pty.cols && selected(pos.x, pos.y))
 		rune.attr ^= ATTR_REVERSE;
 
@@ -488,11 +492,13 @@ static void draw_rune(Point pos)
 			term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 	}
 
+	// Mark the cell as dirty if it changed since last time
 	if (w.dirty || memcmp(&rune, old_rune, sizeof(Rune))) {
 		*old_rune = rune;
 		rune.attr |= ATTR_DIRTY;
 	}
 
+	// For performance, we batch together stretches of runes with the same colors and attrs
 	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
 
 	if ((pos.x == pty.cols || diff) && (prev.attr & ATTR_DIRTY)) {
@@ -726,14 +732,7 @@ static u8 pty_getchar(void)
 	return *pty.c++;
 }
 
-static void reset()
-{
-	memset(&cursor.rune, 0, sizeof(cursor.rune));
-	memset(&saved_cursors, 0, sizeof(saved_cursors));
-	term.top = 0;
-	term.bot = pty.rows - 1;
-}
-
+// Set the graphical attributes of future text based on the parameter `**p`
 static void set_attr(int **p)
 {
 	int attr = *(*p)++;
@@ -745,7 +744,7 @@ static void set_attr(int **p)
 
 	switch (attr) {
 	case 0:
-		memset(&cursor.rune, 0, sizeof(cursor.rune));
+		zeromem(cursor.rune);
 		break;
 	case 1 ... 9:
 		cursor.rune.attr |= 1 << attr;
@@ -785,6 +784,7 @@ static void set_attr(int **p)
 	}
 }
 
+// Set or reset the terminal mode identified by `mode`
 static void set_mode(bool set, int mode)
 {
 	switch (mode) {
@@ -826,6 +826,7 @@ static void set_mode(bool set, int mode)
 	}
 }
 
+// Parse and interpret a control sequence started by ESC [
 static void handle_csi()
 {
 	int arg[16] = { 0 };
@@ -891,7 +892,7 @@ next_csi_byte:
 			cursor.x = 0;
 		}
 		break;
-	case '@': // ICH — Insert <n> blank chars
+	case '@': // ICH — Insert <n> spaces
 	case 'P': // DCH — Delete <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		LIMIT(cursor.x, 0, pty.cols - 1);
@@ -928,8 +929,11 @@ next_csi_byte:
 		if (*arg == 6)
 			printf("\033[%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
-	case 'p': // DECSTR — Soft terminal reset
-		reset();
+	case 'p': // DECSTR — Soft Terminal Reset
+		zeromem(cursor.rune);
+		zeromem(saved_cursors[term.alt]);
+		term.top = 0;
+		term.bot = pty.rows - 1;
 		break;
 	case 'q': // DECSCUSR — Set Cursor Style
 		if (*arg <= 6)
@@ -953,10 +957,10 @@ next_csi_byte:
 	}
 }
 
-//
-static void handle_esc(u8 second_byte)
+// Interpret an escape sequence started by an ESC byte
+static void handle_esc()
 {
-	u8 final_byte = second_byte;
+	u8 second_byte = pty_getchar(), final_byte = second_byte;
 	while (BETWEEN(final_byte, ' ', '/'))
 		final_byte = pty_getchar();
 
@@ -988,15 +992,16 @@ static void handle_esc(u8 second_byte)
 		while (final_byte != '\033' && final_byte != '\a')
 			final_byte = pty_getchar();
 		if (final_byte == '\033')
-			handle_esc(pty_getchar());
+			handle_esc();
 		break;
 	case '[': // CSI — Control Sequence Introducer
 		handle_csi();
 		break;
 	case 'c': // RIS — Reset to inital state
-		memset(&term, 0, sizeof(term));
-		move_to(0, 0);
-		reset();
+		zeromem(term);
+		zeromem(cursor);
+		zeromem(saved_cursors);
+		term.bot = pty.rows - 1;
 		break;
 	case 'n': // Invoke the G2 character set
 	case 'o': // Invoke the G3 character set
@@ -1005,7 +1010,8 @@ static void handle_esc(u8 second_byte)
 	}
 }
 
-static void pty_putchar(u8 u)
+// Handle input from the pty: interpret control characters, parse and save utf-8
+static void handle_input(u8 u)
 {
 invalid_utf8:
 	switch (u) {
@@ -1026,7 +1032,7 @@ invalid_utf8:
 		term.charset = u == '\016';
 		return;
 	case '\033': // ESC
-		handle_esc(pty_getchar());
+		handle_esc();
 		return;
 	case ' ' ... '~':
 	case 128 ... 255:
@@ -1052,6 +1058,7 @@ invalid_utf8:
 	}
 }
 
+// Main loop: listen for X events and pty input, and periodically redraw the screen
 static void run(fd_set read_fds)
 {
 	static struct timeval timeout;
@@ -1061,9 +1068,9 @@ static void run(fd_set read_fds)
 
 	if (FD_ISSET(pty.fd, &read_fds)) {
 		scroll(term.lines - term.scroll);
-		pty_putchar(pty_getchar());
+		handle_input(pty_getchar());
 		while (pty.c < pty.end)
-			pty_putchar(*pty.c++);
+			handle_input(*pty.c++);
 	}
 
 	XEvent e;
@@ -1079,6 +1086,7 @@ static void run(fd_set read_fds)
 	}
 }
 
+// Parse arguents, initialize everything, call the main loop
 int main(int argc, char *argv[])
 {
 	x_init();
