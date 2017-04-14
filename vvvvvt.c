@@ -54,16 +54,17 @@ static u32 utf_len[16] = { 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 0, 0 };
 enum { SNAP_WORD = 2, SNAP_LINE = 3 };
 
 enum {
-	ATTR_BOLD       = 1 << 0,
-	ATTR_FAINT      = 1 << 1,
-	ATTR_ITALIC     = 1 << 2,
-	ATTR_UNDERLINE  = 1 << 3,
-	ATTR_BLINK      = 1 << 4,
-	ATTR_BAR        = 1 << 5,
-	ATTR_REVERSE    = 1 << 6,
-	ATTR_INVISIBLE  = 1 << 7,
-	ATTR_STRUCK     = 1 << 8,
-	ATTR_DIRTY      = 1 << 9,
+	ATTR_BOLD       = 1 << 1,
+	ATTR_FAINT      = 1 << 2,
+	ATTR_ITALIC     = 1 << 3,
+	ATTR_UNDERLINE  = 1 << 4,
+	ATTR_BLINK      = 1 << 5,
+	ATTR_BLINK_FAST = 1 << 6,
+	ATTR_REVERSE    = 1 << 7,
+	ATTR_INVISIBLE  = 1 << 8,
+	ATTR_STRUCK     = 1 << 9,
+	ATTR_BAR        = 1 << 10,
+	ATTR_DIRTY      = 1 << 11,
 };
 
 typedef struct {
@@ -78,7 +79,7 @@ typedef struct {
 	int y;
 } Point;
 
-// State affected by save cursor / restore cursor
+// State affected by Save Cursor / Restore Cursor
 static struct {
 	Rune rune; // current char attributes
 	int x, y;  // cursor position
@@ -92,16 +93,14 @@ static struct {
 } sel;
 
 static struct {
-	char buf[BUFSIZ];  // input buffer
-	char *c;           // current reading position (points inside `buf`)
-	char *end;         // one past the last valid char (points inside `buf`)
-	int fd;            // file descriptor of the master pty
-	int rows;          // number of lines in a screen
-	int cols;          // number of characters in a line
+	char buf[BUFSIZ]; // input buffer
+	char *c;          // current reading position (points inside `buf`)
+	char *end;        // one past the last valid char (points inside `buf`)
+	int fd;           // file descriptor of the master pty
+	int rows, cols;   // size of the pty (in characters)
 	int: 32;
 } pty;
 
-// Terminal state
 static struct {
 	Rune hist[HIST_SIZE][LINE_SIZE]; // history ring buffer
 	int scroll;                      // scroll position (index inside `hist`)
@@ -109,7 +108,7 @@ static struct {
 	int top;                         // top scroll limit
 	int bot;                         // bottom scroll limit
 	int cursor_style;                // appearance of the cursor
-	u8 charsets[4];                  // designated character sets
+	u8 charsets[4];                  // designated character sets (see ISO/IEC 2022)
 	int charset;                     // invoked character set (index inside `charsets`)
 	bool alt;                        // use the alternate screen buffer?
 	bool hide;                       // hide the cursor?
@@ -260,20 +259,13 @@ static void copy(bool clipboard)
 // Print the primary selection (or the clipboard, if `clipboard` is set) to the terminal
 static void paste(bool clipboard)
 {
-	FILE* pipe = popen(clipboard ? "xsel -bo" : "xsel -o", "r");
+	if (term.bracketed_paste)
+		printf("\033[200~");
+
+	system(clipboard ? "xsel -bo" : "xsel -o");
 
 	if (term.bracketed_paste)
-		dprintf(pty.fd, "\033[200~");
-
-	char sel_buf[BUFSIZ] = "";
-	fread(sel_buf, 1, BUFSIZ, pipe);
-	for (char *p = sel_buf; (p = strchr(p, '\n')); *p++ = '\r');
-	dprintf(pty.fd, "%s", sel_buf);
-
-	if (term.bracketed_paste)
-		dprintf(pty.fd, "\033[201~");
-
-	pclose(pipe);
+		printf("\033[201~");
 }
 
 // Set the selection’s point (last position selected)
@@ -546,13 +538,13 @@ static void draw(void)
 static void special_key(u8 c, int state)
 {
 	if (state && c < 'A')
-		dprintf(pty.fd, "\033[%d;%d~", c, state + 1);
+		printf("\033[%d;%d~", c, state + 1);
 	else if (state)
-		dprintf(pty.fd, "\033[1;%d%c", state + 1, c);
+		printf("\033[1;%d%c", state + 1, c);
 	else if (c < 'A')
-		dprintf(pty.fd, "\033[%d~", c);
+		printf("\033[%d~", c);
 	else
-		dprintf(pty.fd, "\033%c%c", term.app_keys ? 'O' : '[', c);
+		printf("\033%c%c", term.app_keys ? 'O' : '[', c);
 }
 
 // Handle keyboard shortcuts, or print the pressed key to the pty
@@ -576,7 +568,7 @@ static void on_keypress(XKeyEvent *e)
 		clear_selection();
 
 	if (meta && term.meta_sends_escape && len)
-		dprintf(pty.fd, "%c", 033);
+		printf("%c", 033);
 
 	if (shift && keysym == XK_Insert)
 		paste(false);
@@ -589,15 +581,15 @@ static void on_keypress(XKeyEvent *e)
 	else if (ctrl && shift && keysym == XK_V)
 		paste(true);
 	else if (keysym == XK_ISO_Left_Tab)
-		dprintf(pty.fd, "%s", "\033[Z");
+		printf("%s", "\033[Z");
 	else if (ctrl && keysym == XK_question)
-		dprintf(pty.fd, "%c", 127);
+		printf("%c", 127);
 	else if (keysym == XK_BackSpace)
-		dprintf(pty.fd, "%c", ctrl ? 027 : 0177);
+		printf("%c", ctrl ? 027 : 0177);
 	else if (BETWEEN(keysym, 0xff50, 0xffff) && codes[keysym - 0xff50])
 		special_key(codes[keysym - 0xff50], 4 * ctrl + 2 * meta + shift);
 	else if (len)
-		write(pty.fd, buf, len);
+		write(1, buf, len);
 }
 
 // Load the new X resources if they changed
@@ -640,7 +632,7 @@ static void on_mouse(XButtonEvent *e)
 
 	if (term.report_buttons && !(e->state & ShiftMask)) {
 		if ((button || term.report_motion) && pos.x <= 222 && pos.y <= 222)
-			dprintf(pty.fd, "\033[M%c%c%c", 31 + button, 33 + pos.x, 33 + pos.y);
+			printf("\033[M%c%c%c", 31 + button, 33 + pos.x, 33 + pos.y);
 		return;
 	}
 
@@ -698,7 +690,7 @@ static void dispatch_event(XEvent * e)
 	case FocusOut:
 		w.focused = e->type == FocusIn;
 		if (term.report_focus)
-			dprintf(pty.fd, "\033[%c", w.focused ? 'I' : 'O');
+			printf("\033[%c", w.focused ? 'I' : 'O');
 		break;
 	}
 }
@@ -715,6 +707,8 @@ static void pty_new(char* cmd[])
 		die("exec failed");
 	default:
 		signal(SIGCHLD, SIG_IGN);
+		dup2(pty.fd, 1);
+		setbuf(stdout, NULL);
 	}
 }
 
@@ -753,10 +747,10 @@ static int set_attr(int *attr)
 		memset(&cursor.rune, 0, sizeof(cursor.rune));
 		return 1;
 	case 1 ... 9:
-		cursor.rune.attr |= 1 << (*attr - 1);
+		cursor.rune.attr |= 1 << *attr;
 		return 1;
 	case 21 ... 29:
-		cursor.rune.attr &= ~(1 << (*attr - 21));
+		cursor.rune.attr &= ~(1 << (*attr - 20));
 		return 1;
 	case 30:
 		*color = 232;
@@ -903,7 +897,7 @@ next_csi_byte:
 		break;
 	case 'c': // DA — Device Attributes
 		if (*arg == 0)
-			dprintf(pty.fd, "%s", "\033[?64;15;22c");
+			printf("%s", "\033[?64;15;22c");
 		break;
 	case 'd': // VPA — Move to <row>
 		move_to(cursor.x, *arg - 1);
@@ -918,7 +912,7 @@ next_csi_byte:
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 6)
-			dprintf(pty.fd, "\033[%i;%iR", cursor.y + 1, cursor.x + 1);
+			printf("\033[%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
 	case 'p': // DECSTR — Soft terminal reset
 		reset();
@@ -936,10 +930,10 @@ next_csi_byte:
 			move_to(0, 0);
 		}
 		break;
-	case 's': // DECSC — Save cursor position
+	case 's': // DECSC — Save Cursor
 		saved_cursors[term.alt] = cursor;
 		break;
-	case 'u': // DECRC — Restore cursor position
+	case 'u': // DECRC — Restore Cursor
 		cursor = saved_cursors[term.alt];
 		break;
 	}
