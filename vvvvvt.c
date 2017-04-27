@@ -39,7 +39,6 @@
 #define LINE(y)             (SLINE((y) + term.scroll))
 #define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
 
-#define clear_selection()   (sel.end = sel.start)
 #define zeromem(x)          (memset(&(x), 0, sizeof(x)))
 #define die(message)        do { perror(message); clean_exit(w.disp); } while (0)
 
@@ -87,10 +86,11 @@ static struct {
 } cursor, saved_cursors[2];
 
 static struct {
-	int snap;    // snapping mode
+	u64 snap;    // snapping mode
 	Point mark;  // coordinates of the point clicked to start the selection
 	Point start; // coordinates of the beginning of the selection (inclusive)
 	Point end;   // coordinates of the end of the selection (exclusive)
+	u64 hash;    // hash of the contents of the selection
 } sel;
 
 static struct {
@@ -148,8 +148,6 @@ static bool selected(int x, int y)
 // Erase all characters between lines `start` and `end` (exclusive)
 static void erase_lines(int start, int end)
 {
-	if (sel.start.y < end && sel.end.y >= start)
-		clear_selection();
 	for (int y = start; y < end; y++)
 		zeromem(LINE(y));
 }
@@ -263,10 +261,27 @@ static void paste(bool clipboard)
 	if (term.bracketed_paste)
 		printf("\033[200~");
 
-	system(clipboard ? "xsel -bo" : "xsel -o");
+	system(clipboard ? "xsel -bo | tr '\n' '\r'" : "xsel -o | tr '\n' '\r'");
 
 	if (term.bracketed_paste)
 		printf("\033[201~");
+}
+
+// Compute the djb2 hash of the contents of the selection
+static u64 sel_get_hash()
+{
+	u64 hash = 5381;
+
+	for (int y = sel.start.y; y <= sel.end.y; y++) {
+		Rune *line = LINE(y);
+		int xstart = y == sel.start.y ? sel.start.x : 0;
+		int xend = y == sel.end.y ? sel.end.x : pty.cols;
+
+		for (int x = xstart; x < xend; ++x)
+			hash = (hash << 5) + hash + line[x].u[0];
+	}
+
+	return hash;
 }
 
 // Set the selection’s point (last position selected)
@@ -281,12 +296,18 @@ static void sel_set_point(Point point)
 	if (sel.snap == SNAP_LINE) {
 		sel.start.x = 0;
 		sel.end.x = pty.cols;
+		while (sel.start.y > 0 && LINE(sel.start.y - 1)[pty.cols - 1].u[0])
+			--sel.start.y;
+		while (LINE(sel.end.y)[pty.cols - 1].u[0])
+			++sel.end.y;
 	} else if (sel.snap == SNAP_WORD) {
 		while (sel.start.x > 0 && !IS_DELIM(LINE(sel.start.y)[sel.start.x - 1].u))
 			--sel.start.x;
 		while (!IS_DELIM(LINE(sel.end.y)[sel.end.x].u))
 			++sel.end.x;
 	}
+
+	sel.hash = sel_get_hash();
 }
 
 // Keep Valgrind from complaining
@@ -533,6 +554,11 @@ static void draw(void)
 			pty.cols * w.font_width, 9999, 0, 0);
 		old_lines = term.lines;
 	}
+
+	// Clear the selection if something wrote over it
+	if (sel_get_hash() != sel.hash)
+		sel.end = sel.start;
+
 	for (Point pos = { 0, 0 }; pos.y < pty.rows; ++pos.y)
 		for (pos.x = 0; pos.x <= pty.cols; ++pos.x)
 			draw_rune(pos);
@@ -569,9 +595,6 @@ static void on_keypress(XKeyEvent *e)
 	char buf[8] = "";
 	KeySym keysym;
 	int len = XLookupString(e, buf, LEN(buf) - 1, &keysym, NULL);
-
-	if (selected(cursor.x, cursor.y))
-		clear_selection();
 
 	if (meta && term.meta_sends_escape && len)
 		printf("%c", 033);
@@ -799,7 +822,6 @@ static void set_mode(bool set, int mode)
 		break;
 	case 47:
 	case 1049: // Alternate screen buffer
-		clear_selection();
 		term.lines += (set - term.alt) * pty.rows;
 		term.scroll = term.lines;
 		if (set)
