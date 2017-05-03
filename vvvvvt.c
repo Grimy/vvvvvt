@@ -35,12 +35,10 @@
 #define IS_DELIM(c)         (strchr(" <>()[]{}'`\"", *(c)))
 #define POINT_EQ(a, b)      ((a).x == (b).x && (a).y == (b).y)
 #define POINT_GT(a, b)      ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
-#define SLINE(y)            (term.hist[(y) % HIST_SIZE])
-#define LINE(y)             (SLINE((y) + term.scroll))
+#define LINE(y)             (term.hist[((y) + term.scroll) % HIST_SIZE])
 #define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
 
 #define zeromem(x)          (memset(&(x), 0, sizeof(x)))
-#define die(message)        do { perror(message); clean_exit(w.disp); } while (0)
 
 typedef enum { false, true } bool;
 typedef uint8_t u8;
@@ -156,6 +154,7 @@ static void erase_lines(int start, int end)
 static void erase_chars(int start, int end)
 {
 	Rune *line = LINE(cursor.y);
+	// TODO memset(line + start, cursor.rune.bg, (end - start) * sizeof(Rune));
 	for (int x = start; x < end; ++x)
 		line[x] = (Rune) { "", 0, 0, cursor.rune.bg };
 }
@@ -172,6 +171,7 @@ static void move_lines(int start, int end, int diff)
 	if (diff < 0)
 		SWAP(start, end);
 	int last = end - diff + step;
+
 	for (int y = start; y != last; y += step)
 		memcpy(LINE(y), LINE(y + diff), sizeof(LINE(y)));
 	erase_lines(MIN(last, end), MAX(last, end) + 1);
@@ -186,6 +186,7 @@ static void move_chars(int start, int end, int diff)
 	if (diff < 0)
 		SWAP(start, end);
 	int last = end - diff + step;
+
 	for (int x = start; x != last; x += step)
 		line[x] = line[x + diff];
 	erase_chars(MIN(last, end), MAX(last, end) + 1);
@@ -220,7 +221,6 @@ static void newline()
 		++term.lines;
 		scroll(1);
 		move_lines(term.bot, pty.rows - 1, -1);
-		erase_lines(2 * pty.rows - 1, 2 * pty.rows);
 	}
 }
 
@@ -315,6 +315,12 @@ static int __attribute__((noreturn)) clean_exit(Display *disp)
 		XftFontClose(disp, w.font[i]);
 	XCloseDisplay(disp);
 	exit(0);
+}
+
+static void __attribute__((noreturn)) die(const char* message)
+{
+	perror(message);
+	clean_exit(w.disp);
 }
 
 // Recompute the number of text rows/columns from the given pixel dimensions
@@ -487,7 +493,7 @@ static void draw_text(Rune rune, u8 *text, int num_chars, int num_bytes, Point p
 }
 
 // Check the cell at position `pos`, redraw it if necessary
-static void draw_rune(Point pos)
+static void draw_rune(Point pos, Rune *cached_rune)
 {
 	static u8 buf[4 * LINE_SIZE];
 	static int len;
@@ -495,7 +501,6 @@ static void draw_rune(Point pos)
 	static Point prev_pos;
 
 	Rune rune = LINE(pos.y)[pos.x];
-	Rune *old_rune = &SLINE(pos.y + term.lines + pty.rows)[pos.x];
 
 	// Default colors
 	u8 *defaulted = term.reverse_video ? &rune.bg : &rune.fg;
@@ -512,8 +517,8 @@ static void draw_rune(Point pos)
 	}
 
 	// Mark the cell as dirty if it changed since last time
-	if (w.dirty || memcmp(&rune, old_rune, sizeof(Rune))) {
-		*old_rune = rune;
+	if (w.dirty || memcmp(&rune, cached_rune, sizeof(Rune))) {
+		*cached_rune = rune;
 		rune.attr |= ATTR_DIRTY;
 	}
 
@@ -545,23 +550,37 @@ static void draw_rune(Point pos)
 // Update the display
 static void draw(void)
 {
-	static int old_lines;
-	if (term.lines != old_lines) {
+	static int old_scroll;
+
+	if (term.scroll != old_scroll) {
+		int src  = MAX(term.scroll - old_scroll, 0);
+		int dest = MAX(old_scroll - term.scroll, 0);
+		int size = pty.rows - src - dest;
+
 		XCopyArea(w.disp, w.win, w.win, XDefaultGC(w.disp, w.screen),
-			0, (term.lines - old_lines) * w.font_height,
-			pty.cols * w.font_width, 9999, 0, 0);
-		old_lines = term.lines;
+			0, w.font_height * src,
+			w.font_width * pty.cols, w.font_height * size,
+			0, w.font_height * dest);
 	}
 
 	// Clear the selection if something wrote over it
 	if (sel_get_hash() != sel.hash)
 		sel.end = sel.start;
 
-	for (Point pos = { 0, 0 }; pos.y < pty.rows; ++pos.y)
-		for (pos.x = 0; pos.x <= pty.cols; ++pos.x)
-			draw_rune(pos);
+	for (int y = 0; y < pty.rows; ++y) {
+		Rune *cache_line = LINE(y + pty.rows * (1 + (pty.rows - y + term.lines - term.scroll) / pty.rows));
+
+		// The three hardest things in CS are off-by-one errors and cache invalidation
+		if (!BETWEEN(y + term.scroll, old_scroll, old_scroll + pty.rows - 1))
+			memset(cache_line, 0, sizeof(Rune[LINE_SIZE]));
+
+		for (int x = 0; x <= pty.cols; ++x)
+			draw_rune((Point) { x, y }, &cache_line[x]);
+	}
+
 	XFlush(w.disp);
 	w.dirty = false;
+	old_scroll = term.scroll;
 }
 
 // Print the escape sequence for special key `c`, with modifiers `state`
@@ -823,7 +842,7 @@ static void set_mode(bool set, int mode)
 		term.lines += (set - term.alt) * pty.rows;
 		term.scroll = term.lines;
 		if (set)
-			erase_lines(0, 2 * pty.rows);
+			erase_lines(0, pty.rows);
 		else
 			cursor = saved_cursors[0];
 		saved_cursors[term.alt] = cursor;
