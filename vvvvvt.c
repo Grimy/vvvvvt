@@ -232,6 +232,13 @@ static Point pixel2cell(int px, int py)
 	return (Point) { MAX(x, 0), MAX(y, 0) };
 }
 
+static void next_point(Point *p)
+{
+	++p->x;
+	if (p->x == pty.cols)
+		*p = (Point) { 0, p->y + 1 };
+}
+
 // Copy the selected text to the primary selection (or the clipboard, if `clipboard` is set)
 static void copy(bool clipboard)
 {
@@ -240,16 +247,13 @@ static void copy(bool clipboard)
 		return;
 
 	FILE* pipe = popen(clipboard ? "xsel -bi" : "xsel -i", "w");
+	bool empty = false;
 
-	for (int y = sel.start.y; y <= sel.end.y; y++) {
-		Rune *line = LINE(y);
-		int xstart = y == sel.start.y ? sel.start.x : 0;
-		int xend = y == sel.end.y ? sel.end.x : pty.cols;
-
-		for (int x = xstart; x < xend; ++x)
-			fprintf(pipe, "%.4s", line[x].u);
-		if (xend == pty.cols && !line[pty.cols - 1].u[0])
-			fprintf(pipe, "\n");
+	for (Point p = sel.start; !POINT_GT(p, sel.end); next_point(&p)) {
+		u8 *text = LINE(p.y)[p.x].u;
+		if (empty && *text)
+			fputc(p.x ? ' ' : '\n', pipe);
+		empty = !fprintf(pipe, "%.4s", text);
 	}
 
 	pclose(pipe);
@@ -272,14 +276,8 @@ static u64 sel_get_hash()
 {
 	u64 hash = 5381;
 
-	for (int y = sel.start.y; y <= sel.end.y; y++) {
-		Rune *line = LINE(y);
-		int xstart = y == sel.start.y ? sel.start.x : 0;
-		int xend = y == sel.end.y ? sel.end.x : pty.cols;
-
-		for (int x = xstart; x < xend; ++x)
-			hash = (hash << 5) + hash + line[x].u[0];
-	}
+	for (Point p = sel.start; !POINT_GT(p, sel.end); next_point(&p))
+		hash = (hash << 5) + hash + LINE(p.y)[p.x].u[0];
 
 	return hash;
 }

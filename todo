@@ -8,4 +8,3 @@
 * handle scrollTtyOutput
 * convert some macros into functions
 * test `less` with wrapping lines
-* refactor the selection iteration logic
