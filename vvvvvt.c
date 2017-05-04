@@ -249,7 +249,7 @@ static void copy(bool clipboard)
 	FILE* pipe = popen(clipboard ? "xsel -bi" : "xsel -i", "w");
 	bool empty = false;
 
-	for (Point p = sel.start; !POINT_GT(p, sel.end); next_point(&p)) {
+	for (Point p = sel.start; !POINT_EQ(p, sel.end); next_point(&p)) {
 		u8 *text = LINE(p.y)[p.x].u;
 		if (empty && *text)
 			fputc(p.x ? ' ' : '\n', pipe);
@@ -276,7 +276,7 @@ static u64 sel_get_hash()
 {
 	u64 hash = 5381;
 
-	for (Point p = sel.start; !POINT_GT(p, sel.end); next_point(&p))
+	for (Point p = sel.start; !POINT_EQ(p, sel.end); next_point(&p))
 		hash = (hash << 5) + hash + LINE(p.y)[p.x].u[0];
 
 	return hash;

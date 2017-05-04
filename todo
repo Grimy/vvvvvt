@@ -6,4 +6,3 @@
 * CSI !p → reset some mode flags as well
 * stricter CSI parsing
 * convert some macros into functions
-* test `less` with wrapping lines
