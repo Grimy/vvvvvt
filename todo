@@ -5,4 +5,3 @@
 * add bg/fg colors separate from 0 and 15?
 * CSI !p → reset some mode flags as well
 * stricter CSI parsing
-* convert some macros into functions

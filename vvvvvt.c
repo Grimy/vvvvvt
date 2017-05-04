@@ -36,7 +36,6 @@
 #define POINT_EQ(a, b)      ((a).x == (b).x && (a).y == (b).y)
 #define POINT_GT(a, b)      ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define LINE(y)             (term.hist[((y) + term.scroll) % HIST_SIZE])
-#define UTF_LEN(c)          ((c) < 0xC0 ? 1 : (c) < 0xE0 ? 2 : (c) < 0xF0 ? 3 : utf_len[c & 0x0F])
 
 #define zeromem(x)          (memset(&(x), 0, sizeof(x)))
 
@@ -45,8 +44,6 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
-
-static u32 utf_len[16] = { 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 0, 0 };
 
 // Selection snapping modes
 enum { SNAP_WORD = 2, SNAP_LINE = 3 };
@@ -134,6 +131,13 @@ static struct {
 	int border;
 	bool focused;
 } w;
+
+// Number of bytes in an UTF-8 sequence starting with byte `c`
+static u32 utf_len(u8 c)
+{
+	static u32 lookup[16] = { 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 0, 0 };
+	return c < 0xC0 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : lookup[c & 0x0F];
+}
 
 // Is the character at row `y`, column `x` currently selected?
 static bool selected(int x, int y)
@@ -232,6 +236,7 @@ static Point pixel2cell(int px, int py)
 	return (Point) { MAX(x, 0), MAX(y, 0) };
 }
 
+// “Increment” the point `p`, wrapping at lines’ end
 static void next_point(Point *p)
 {
 	++p->x;
@@ -317,6 +322,7 @@ static int __attribute__((noreturn)) clean_exit(Display *disp)
 	exit(0);
 }
 
+// Exit after a failed syscall
 static void __attribute__((noreturn)) die(const char* message)
 {
 	perror(message);
@@ -538,9 +544,9 @@ static void draw_rune(Point pos, Rune *cached_rune)
 	// Pick an appropriate rendition: NUL becomes space, invalid UTF-8 becomes ⁇
 	if (*rune.u < 0x80) {
 		buf[len++] = MAX(*rune.u, ' ');
-	} else if (*rune.u >= 0xC0 && strnlen((char*) rune.u, 4) == UTF_LEN(*rune.u)) {
-		memcpy(buf + len, rune.u, UTF_LEN(*rune.u));
-		len += UTF_LEN(*rune.u);
+	} else if (*rune.u >= 0xC0 && strnlen((char*) rune.u, 4) == utf_len(*rune.u)) {
+		memcpy(buf + len, rune.u, utf_len(*rune.u));
+		len += utf_len(*rune.u);
 	} else {
 		memcpy(buf + len, "⁇", 3);
 		len += 3;
@@ -1085,7 +1091,7 @@ invalid_utf8:
 		*rune = cursor.rune;
 		++cursor.x;
 
-		for (long i = 1, len = UTF_LEN(u); i < len; ++i) {
+		for (long i = 1, len = utf_len(u); i < len; ++i) {
 			u = pty_getchar();
 			if (!BETWEEN(u, 128, 191))
 				goto invalid_utf8;
