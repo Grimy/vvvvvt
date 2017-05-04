@@ -974,12 +974,6 @@ next_csi_byte:
 		if (*arg == 6)
 			printf("\033[%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
-	case 'p': // DECSTR — Soft Terminal Reset
-		zeromem(cursor.rune);
-		zeromem(saved_cursors[term.alt]);
-		term.top = 0;
-		term.bot = pty.rows - 1;
-		break;
 	case 'q': // DECSCUSR — Set Cursor Style
 		if (*arg <= 6)
 			term.cursor_style = *arg;
