@@ -874,23 +874,25 @@ static void set_mode(bool set, int mode)
 // Parse and interpret a control sequence started by ESC [
 static void handle_csi()
 {
+	u8 private_byte = 0;
 	int arg[16] = { 0 };
 	u32 nargs = 0;
-	char command = 0;
+	u8 intermediate_byte = 0;
+	u8 c = pty_getchar();
 
-next_csi_byte:
-	switch (command = pty_getchar()) {
-	case '0' ... '9':
-		if (arg[nargs] < 10000)
-			arg[nargs] = 10 * arg[nargs] + command - '0';
-		goto next_csi_byte;
-	case ':':
-	case ';':
-		nargs = MIN(nargs + 1, LEN(arg) - 3);
-		goto next_csi_byte;
-	case ' ' ... '/': // Intermediate bytes
-	case '<' ... '?': // Private parameter bytes
-		goto next_csi_byte;
+	for (; BETWEEN(c, '<', '?'); c = pty_getchar())
+		private_byte = c;
+
+	for (; BETWEEN(c, '0', ';'); c = pty_getchar())
+		if (c > '9')
+			nargs = MIN(nargs + 1, LEN(arg) - 3);
+		else if (arg[nargs] < 10000)
+			arg[nargs] = 10 * arg[nargs] + c - '0';
+
+	for (; BETWEEN(c, ' ', '?'); c = pty_getchar())
+		intermediate_byte = c;
+
+	switch (private_byte << 16 | intermediate_byte << 8 | c) {
 	case 'A': // CUU — Cursor <n> up
 		move_to(cursor.x, cursor.y - MAX(*arg, 1));
 		break;
@@ -933,7 +935,7 @@ next_csi_byte:
 	case 'M': // DL — Delete <n> lines
 		if (BETWEEN(cursor.y, term.top, term.bot)) {
 			LIMIT(*arg, 1, term.bot - cursor.y + 1);
-			move_lines(cursor.y, term.bot, command == 'L' ? -*arg : *arg);
+			move_lines(cursor.y, term.bot, c == 'L' ? -*arg : *arg);
 			cursor.x = 0;
 		}
 		break;
@@ -941,12 +943,12 @@ next_csi_byte:
 	case 'P': // DCH — Delete <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
 		LIMIT(cursor.x, 0, pty.cols - 1);
-		move_chars(cursor.x, pty.cols, command == '@' ? -*arg : *arg);
+		move_chars(cursor.x, pty.cols, c == '@' ? -*arg : *arg);
 		break;
 	case 'S': // SU — Scroll <n> lines up
 	case 'T': // SD — Scroll <n> lines down
 		LIMIT(*arg, 1, term.bot - term.top + 1);
-		move_lines(term.top, term.bot, command == 'T' ? -*arg : *arg);
+		move_lines(term.top, term.bot, c == 'T' ? -*arg : *arg);
 		break;
 	case 'X': // ECH — Erase <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
@@ -962,10 +964,10 @@ next_csi_byte:
 	case 'd': // VPA — Move to <row>
 		move_to(cursor.x, *arg - 1);
 		break;
-	case 'h': // SM — Set Mode
-	case 'l': // RM — Reset Mode
+	case '?\0h': // SM — Set Mode
+	case '?\0l': // RM — Reset Mode
 		for (u32 i = 0; i <= nargs; ++i)
-			set_mode(command == 'h', arg[i]);
+			set_mode(c == 'h', arg[i]);
 		break;
 	case 'm': // SGR — Select Graphic Rendition
 		for (int *p = arg; p <= arg + nargs; set_attr(&p));
@@ -974,7 +976,7 @@ next_csi_byte:
 		if (*arg == 6)
 			printf("\033[%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
-	case 'q': // DECSCUSR — Set Cursor Style
+	case ' q': // DECSCUSR — Set Cursor Style
 		if (*arg <= 6)
 			term.cursor_style = *arg;
 		break;

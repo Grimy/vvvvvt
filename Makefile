@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS += -std=c99 -D_POSIX_C_SOURCE=200809 -Weverything -Werror
-CFLAGS += -Wno-sign-conversion -Wno-gnu-case-range
+CFLAGS += -Wno-sign-conversion -Wno-gnu-case-range -Wno-multichar
 CFLAGS += -fstrict-aliasing -fstrict-overflow
 CFLAGS += -g -O3 -fno-omit-frame-pointer -fsanitize=address,undefined
 # CFLAGS += -O3 -fno-inline

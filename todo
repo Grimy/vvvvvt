@@ -3,4 +3,3 @@
 * more tests
 * set colors 232 — 255 as gradient from 0 → 15?
 * add bg/fg colors separate from 0 and 15?
-* stricter CSI parsing
