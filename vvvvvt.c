@@ -76,8 +76,8 @@ typedef struct {
 
 // State affected by Save Cursor / Restore Cursor
 static struct {
-	Rune rune; // current char attributes
-	int x, y;  // cursor position
+	Rune rune;          // current char attributes
+	int x, y;           // cursor position
 } cursor, saved_cursors[2];
 
 static struct {
@@ -236,7 +236,7 @@ static Point pixel2cell(int px, int py)
 	return (Point) { MAX(x, 0), MAX(y, 0) };
 }
 
-// “Increment” the point `p`, wrapping at lines’ end
+// “Increment” the point `p`, wrapping around line endings
 static void next_point(Point *p)
 {
 	++p->x;
@@ -297,17 +297,17 @@ static void sel_set_point(Point point)
 	sel.end = swapped ? sel.mark : point;
 
 	if (sel.snap == SNAP_LINE) {
-		sel.start.x = 0;
-		sel.end.x = pty.cols;
+		sel.start.x = sel.end.x = 0;
+		++sel.end.y;
 		while (sel.start.y > 0 && LINE(sel.start.y - 1)[pty.cols - 1].u[0])
 			--sel.start.y;
-		while (LINE(sel.end.y)[pty.cols - 1].u[0])
+		while (LINE(sel.end.y - 1)[pty.cols - 1].u[0])
 			++sel.end.y;
 	} else if (sel.snap == SNAP_WORD) {
 		while (sel.start.x > 0 && !IS_DELIM(LINE(sel.start.y)[sel.start.x - 1].u))
 			--sel.start.x;
 		while (!IS_DELIM(LINE(sel.end.y)[sel.end.x].u))
-			++sel.end.x;
+			next_point(&sel.end);
 	}
 
 	sel.hash = sel_get_hash();
