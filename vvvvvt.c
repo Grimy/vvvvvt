@@ -517,7 +517,8 @@ static void draw_rune(Point pos, Rune *cached_rune)
 	if (pos.x != pty.cols && selected(pos.x, pos.y))
 		rune.attr ^= ATTR_REVERSE;
 
-	if (!term.hide && term.scroll == term.lines && POINT_EQ(pos, cursor)) {
+	Point adjusted_pos = { pos.x, pos.y + term.scroll - term.lines };
+	if (!term.hide && POINT_EQ(adjusted_pos, cursor)) {
 		rune.attr ^= w.focused && term.cursor_style < 3 ? ATTR_REVERSE :
 			term.cursor_style < 5 ? ATTR_UNDERLINE : ATTR_BAR;
 	}
