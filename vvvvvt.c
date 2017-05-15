@@ -115,6 +115,7 @@ static struct {
 	bool bracketed_paste;            // send escape sequences before/after each paste?
 	bool app_keys;                   // send different escape sequences for arrow keys?
 	bool meta_sends_escape;          // send an ESC char when a key is pressed with meta held?
+	bool bold_as_bright;             // use bright (8–15) colors for bold characters
 } term;
 
 // Drawing context
@@ -424,6 +425,7 @@ static void load_resources()
 	w.border = atoi(get_resource("internalBorder", "2"));
 	XMoveWindow(w.disp, w.win, w.border, w.border);
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
+	term.bold_as_bright = is_true(get_resource("showBoldAsBright", "yes"));
 }
 
 // Connect to the X server and set up our windows (gritty X11 stuff)
@@ -512,6 +514,9 @@ static void draw_rune(Point pos, Rune *cached_rune)
 	u8 *defaulted = term.reverse_video ? &rune.bg : &rune.fg;
 	if (*defaulted == 0)
 		*defaulted = 15;
+
+	if (rune.fg < 8 && (rune.attr & ATTR_BOLD) && term.bold_as_bright)
+		rune.fg |= 8;
 
 	// Add special attributes to render the selection and cursor
 	if (pos.x != pty.cols && selected(pos.x, pos.y))
