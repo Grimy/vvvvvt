@@ -1,0 +1,8 @@
+A collection of strings that used to hang, segfault, or otherwise crash vvvvvt.
+This helps ensuring that those crashes stay fixed.
+
+[;;;;;;;;38;2;255;255;255mm
+[;;;;;;;;;38;2;255;255;255mm
+[;;;;;;;;;;38;2;255;255;255mm
+[;;;;;;;;;;;38;2;255;255;255mm
+[;;;;;;;;;;;;38;2;255;255;255mm

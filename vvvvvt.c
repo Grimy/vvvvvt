@@ -888,21 +888,23 @@ static void handle_csi()
 {
 	u8 private_byte = 0;
 	int arg[16] = { 0 };
-	u32 nargs = 0;
+	int *last_arg = arg;
 	u8 intermediate_byte = 0;
 	u8 c = pty_getchar();
 
 	for (; BETWEEN(c, '<', '?'); c = pty_getchar())
-		private_byte = c;
+		private_byte += c;
 
 	for (; BETWEEN(c, '0', ';'); c = pty_getchar())
-		if (c > '9')
-			nargs = MIN(nargs + 1, LEN(arg) - 3);
-		else if (arg[nargs] < 10000)
-			arg[nargs] = 10 * arg[nargs] + c - '0';
+		if (last_arg > arg + LEN(arg) - 4)
+			/* do nothing, to prevent an overflow */;
+		else if (c > '9')
+			++last_arg;
+		else if (*last_arg < 10000)
+			*last_arg = *last_arg * 10 + c - '0';
 
 	for (; BETWEEN(c, ' ', '?'); c = pty_getchar())
-		intermediate_byte = c;
+		intermediate_byte += c;
 
 	switch (private_byte << 16 | intermediate_byte << 8 | c) {
 	case 'A': // CUU — Cursor <n> up
@@ -978,11 +980,11 @@ static void handle_csi()
 		break;
 	case '?\0h': // SM — Set Mode
 	case '?\0l': // RM — Reset Mode
-		for (u32 i = 0; i <= nargs; ++i)
-			set_mode(c == 'h', arg[i]);
+		for (int *p = arg; p <= last_arg; ++p)
+			set_mode(c == 'h', *p);
 		break;
 	case 'm': // SGR — Select Graphic Rendition
-		for (int *p = arg; p <= arg + nargs; set_attr(&p));
+		for (int *p = arg; p <= last_arg; set_attr(&p));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 6)
