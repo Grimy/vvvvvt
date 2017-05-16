@@ -3,6 +3,3 @@
 * more tests
 * set colors 232 — 255 as gradient from 0 → 15?
 * add bg/fg colors separate from 0 and 15?
-* CSI 0 g: clear current tab
-* CSI 3 g: clear all tabs
-* Esc H: add tabstop

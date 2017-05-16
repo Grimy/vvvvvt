@@ -99,6 +99,7 @@ static struct {
 
 static struct {
 	Rune hist[HIST_SIZE][LINE_SIZE]; // history ring buffer
+	bool tabs[LINE_SIZE];            // tab stops
 	int scroll;                      // scroll position (index inside `hist`)
 	int lines;                       // last line printed (index inside `hist`)
 	int top;                         // top scroll limit
@@ -330,6 +331,13 @@ static void __attribute__((noreturn)) die(const char* message)
 	clean_exit(w.disp);
 }
 
+static void fix_stuff()
+{
+	term.bot = pty.rows - 1;
+	for (u64 x = 0; x < LINE_SIZE; x += 8)
+		term.tabs[x] = true;
+}
+
 // Recompute the number of text rows/columns from the given pixel dimensions
 static void fix_pty_size(int width, int height)
 {
@@ -341,7 +349,7 @@ static void fix_pty_size(int width, int height)
 	pty.cols = LIMIT(new_size.x, 1, LINE_SIZE - 1);
 	pty.rows = LIMIT(new_size.y, 1, HIST_SIZE / 2);
 	term.top = 0;
-	term.bot = pty.rows - 1;
+	fix_stuff();
 	move_to(cursor.x, cursor.y);
 
 	// Send our size to the pty driver so that applications can query it
@@ -940,7 +948,8 @@ static void handle_csi()
 		move_to(arg[1] - 1, arg[0] - 1);
 		break;
 	case 'I': // CHT — Cursor forward <n> tabulation stops
-		move_to(((cursor.x >> 3) + MAX(*arg, 1)) << 3, cursor.y);
+		*arg = MAX(*arg, 1);
+		while (++cursor.x < pty.cols - 1 && (*arg -= term.tabs[cursor.x]));
 		break;
 	case 'J': // ED — Erase display
 		erase_lines(*arg ? 0 : cursor.y + 1, *arg == 1 ? cursor.y : pty.rows);
@@ -972,7 +981,8 @@ static void handle_csi()
 		erase_chars(cursor.x, cursor.x + *arg);
 		break;
 	case 'Z': // CBT — Cursor backward <n> tabulation stops
-		move_to(((cursor.x >> 3) - MAX(*arg, 1)) << 3, cursor.y);
+		*arg = MAX(*arg, 1);
+		while (--cursor.x && (*arg -= term.tabs[cursor.x]));
 		break;
 	case 'c':    // DA — Device Attributes
 	case '>\0c': // Secondary DA
@@ -981,6 +991,12 @@ static void handle_csi()
 		break;
 	case 'd': // VPA — Move to <row>
 		move_to(cursor.x, *arg - 1);
+		break;
+	case 'g': // TBC — Tabulation Clear
+		if (*arg == 0)
+			term.tabs[cursor.x] = false;
+		else if (*arg == 3)
+			zeromem(term.tabs);
 		break;
 	case '?\0h': // SM — Set Mode
 	case '?\0l': // RM — Reset Mode
@@ -1039,6 +1055,9 @@ static void handle_esc()
 		newline();
 		cursor.x = 0;
 		break;
+	case 'H': // HTS — Tab Set
+		term.tabs[cursor.x] = true;
+		break;
 	case 'M': // RI — Reverse index
 		if (cursor.y <= term.top)
 			move_lines(term.top, term.bot, -1);
@@ -1062,7 +1081,7 @@ static void handle_esc()
 		zeromem(term);
 		zeromem(cursor);
 		zeromem(saved_cursors);
-		term.bot = pty.rows - 1;
+		fix_stuff();
 		break;
 	case 'n': // Invoke the G2 character set
 	case 'o': // Invoke the G3 character set
@@ -1080,7 +1099,7 @@ invalid_utf8:
 		move_to(cursor.x - 1, cursor.y);
 		return;
 	case '\t':
-		move_to(((cursor.x >> 3) + 1) << 3, cursor.y);
+		while (++cursor.x < pty.cols - 1 && !term.tabs[cursor.x]);
 		return;
 	case '\n' ... '\f':
 		newline();
