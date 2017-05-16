@@ -554,16 +554,14 @@ static void draw_rune(Point pos, Rune *cached_rune)
 		prev_pos = pos;
 	}
 
-	bool invalid_utf8 = BETWEEN(rune.u[0], 0x80, 0xC1)
-		|| (rune.u[0] == 0xE0 && rune.u[1] < 0xa0)
-		|| (rune.u[0] == 0xF0 && rune.u[1] < 0x90)
-		|| (rune.u[0] == 0xF8 && rune.u[1] < 0x88)
-		|| strnlen((char*) rune.u, 4) != utf_len(rune.u[0]);
+	bool valid_utf8 = rune.u[0] > 0xC1
+		&& ((u8) (~rune.u[0] & -rune.u[0]) || rune.u[0] + rune.u[1] & 128)
+		&& strnlen((char*) rune.u, 4) == utf_len(rune.u[0]);
 
 	// Pick an appropriate rendition: NUL becomes space, invalid UTF-8 becomes ⁇
 	if (*rune.u < 0x80) {
 		buf[len++] = MAX(*rune.u, ' ');
-	} else if (invalid_utf8) {
+	} else if (!valid_utf8) {
 		memcpy(buf + len, "⁇", 3);
 		len += 3;
 	} else {
