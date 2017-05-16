@@ -1131,8 +1131,12 @@ invalid_utf8:
 			rune->u[i & 3] = u;
 		}
 
-		if (term.charsets[term.charset] == '0' && BETWEEN(u, 'j', 'x'))
+		if (term.charsets[term.charset] == '0' && BETWEEN(u, 'j', 'x')) {
 			memcpy(rune, &"┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│"[(u - 'j') * 3], 3);
+		} else if (term.charsets[term.charset] == 'A' && BETWEEN(u, ' ', '~')) {
+			rune->u[0] = 194 + (u > '?');
+			rune->u[1] = 128 + (u & '?');
+		}
 	}
 }
 
