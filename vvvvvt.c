@@ -617,9 +617,11 @@ static void special_key(u8 c, int state)
 static void on_keypress(XKeyEvent *e)
 {
 	static const u8 codes[] = {
-		'H', 'D', 'A', 'C', 'B', 5, 6, 'F', [19] = 2, [175] = 3,     // cursor keys
-		[69] = 'H', 'D', 'A', 'C', 'B', 5, 6, 'F', 'E', 2, 3,        // numpad
-		[110] = 'P', 'Q', 'R', 'S', 15, 17, 18, 19, 20, 21, 23, 24,  // function keys
+		'H', 'D', 'A', 'C', 'B', 5, 6, 'F', [19] = 2, [175] = 3,  // cursor keys
+		[69] = 'H', 'D', 'A', 'C', 'B', 5, 6, 'F', 'E', 2, 3,     // numpad
+		[110] = 'P', 'Q', 'R', 'S', 15, 17, 18, 19, 20, 21,       // F1 - F10
+		23, 24, 25, 26, 28, 29, 31, 32, 33, 34, 42, 43, 44,       // F11 - F23
+		45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,           // F24 - F35
 	};
 
 	bool shift = (e->state & ShiftMask) != 0;
@@ -972,9 +974,10 @@ static void handle_csi()
 	case 'Z': // CBT — Cursor backward <n> tabulation stops
 		move_to(((cursor.x >> 3) - MAX(*arg, 1)) << 3, cursor.y);
 		break;
-	case 'c': // DA — Device Attributes
+	case 'c':    // DA — Device Attributes
+	case '>\0c': // Secondary DA
 		if (*arg == 0)
-			printf("%s", "\033[?64;15;22c");
+			printf(private_byte ? "\033[>1;0;0c" : "\033[?62;15;22c");
 		break;
 	case 'd': // VPA — Move to <row>
 		move_to(cursor.x, *arg - 1);
@@ -985,10 +988,12 @@ static void handle_csi()
 			set_mode(c == 'h', *p);
 		break;
 	case 'm': // SGR — Select Graphic Rendition
-		for (int *p = arg; p <= last_arg; set_attr(&p));
+		for (int *p = arg; p <= last_arg; p = set_attr(p));
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
-		if (*arg == 6)
+		if (*arg == 5)
+			printf("\033[0n");
+		else if (*arg == 6)
 			printf("\033[%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
 	case ' q': // DECSCUSR — Set Cursor Style
