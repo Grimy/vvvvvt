@@ -537,9 +537,8 @@ static void draw_rune(Point pos, Rune *cached_rune)
 	// For performance, we batch together stretches of runes with the same colors and attrs
 	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
 
-	if ((pos.x == pty.cols || diff) && (prev.attr & ATTR_DIRTY)) {
+	if ((pos.x == pty.cols || diff) && (prev.attr & ATTR_DIRTY))
 		draw_text(prev, buf, pos.x - prev_pos.x, len, prev_pos);
-	}
 
 	if (pos.x == 0 || diff) {
 		len = 0;
@@ -645,7 +644,7 @@ static void on_keypress(XKeyEvent *e)
 	else if (ctrl && shift && keysym == XK_V)
 		paste(true);
 	else if (keysym == XK_ISO_Left_Tab)
-		printf("%s", "\033[Z");
+		printf("\033[Z");
 	else if (ctrl && keysym == XK_question)
 		printf("%c", 127);
 	else if (keysym == XK_BackSpace)
@@ -791,21 +790,20 @@ static u8 pty_getchar(void)
 }
 
 // Set the graphical attributes of future text based on the parameter `**p`
-static void set_attr(int **p)
+static int* set_attr(int *attr)
 {
-	int attr = *(*p)++;
 	u8 *color = &cursor.rune.fg;
-	if (BETWEEN(attr, 40, 49) || BETWEEN(attr, 100, 107)) {
+	if (BETWEEN(*attr, 40, 49) || BETWEEN(*attr, 100, 107)) {
 		color = &cursor.rune.bg;
-		attr -= 10;
+		*attr -= 10;
 	}
 
-	switch (attr) {
+	switch (*attr) {
 	case 0:
 		zeromem(cursor.rune);
 		break;
 	case 1 ... 9:
-		cursor.rune.attr |= 1 << attr;
+		cursor.rune.attr |= 1 << *attr;
 		break;
 	case 21:
 		cursor.rune.attr |= ATTR_UNDERLINE;
@@ -814,32 +812,33 @@ static void set_attr(int **p)
 		cursor.rune.attr &= ~(ATTR_BOLD | ATTR_FAINT);
 		break;
 	case 23 ... 29:
-		cursor.rune.attr &= ~(1 << (attr - 20));
+		cursor.rune.attr &= ~(1 << (*attr - 20));
 		break;
 	case 30:
 		*color = 232;
 		break;
 	case 31 ... 37:
-		*color = (u8) (attr - 30);
+		*color = (u8) (*attr - 30);
 		break;
 	case 38:
-		attr = *(*p)++;
-		if (attr == 2) {
-			int r = (*(*p)++ - 35) / 40;
-			int g = (*(*p)++ - 35) / 40;
-			int b = (*(*p)++ - 35) / 40;
+		if (*++attr == 2) {
+			int r = (*++attr - 35) / 40;
+			int g = (*++attr - 35) / 40;
+			int b = (*++attr - 35) / 40;
 			*color = (u8) (16 + 36 * r + 6 * g + b);
-		} else if (attr == 5) {
-			*color = (u8) *(*p)++;
+		} else if (*attr == 5) {
+			*color = (u8) *++attr;
 		}
 		break;
 	case 39:
 		*color = 0;
 		break;
 	case 90 ... 97:
-		*color = (u8) (attr - 90 + 8);
+		*color = (u8) (*attr - 90 + 8);
 		break;
 	}
+
+	return attr + 1;
 }
 
 // Set or reset the terminal mode identified by `mode`
@@ -886,11 +885,13 @@ static void set_mode(bool set, int mode)
 // Parse and interpret a control sequence started by ESC [
 static void handle_csi()
 {
+	static int arg[16];
+
 	u8 private_byte = 0;
-	int arg[16] = { 0 };
 	int *last_arg = arg;
 	u8 intermediate_byte = 0;
 	u8 c = pty_getchar();
+	*arg = 0;
 
 	for (; BETWEEN(c, '<', '?'); c = pty_getchar())
 		private_byte += c;
@@ -899,7 +900,7 @@ static void handle_csi()
 		if (last_arg > arg + LEN(arg) - 4)
 			/* do nothing, to prevent an overflow */;
 		else if (c > '9')
-			++last_arg;
+			*++last_arg = 0;
 		else if (*last_arg < 10000)
 			*last_arg = *last_arg * 10 + c - '0';
 
