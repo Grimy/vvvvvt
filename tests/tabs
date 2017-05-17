@@ -1,2 +1,4 @@
-XTerm has weird behavior here, so we imitate urxvt instead.
-	123[3I1234567	12345678	123[99II[ZZ[3ZZ[99ZZ
+Forward and backward tabulations, add and remove tab stops
+
+	123[3I1234567[I12345678	123[99ZZ[99II[3ZZ[8II[3ZZ[ZZ
+	[gg[GG	H[1g1H[2g[G[2II[3g[II

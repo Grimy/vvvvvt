@@ -2,5 +2,5 @@ The following CSI sequences are all invalid. Text should appear with the default
 color, cursor shape should not change, and reverse video should not be enabled.
 
 [<31mm [=31mm [>31mm [?31mm [31 mm [31?mm
-[5h [<5h [=5h [>5h [??5h [<?5h [?>5h
-[6q [6!q [6! q [6 !q [6  q
+[5h [<5h [=5h [>5h [??5h [<?5h [?>5h [?5?h [5?h [?5 h
+[6q [6!q [6! q [6 !q [6  q [6 6q [6 :q [6 ;q [?6 q [ 6q [ 6 q [6? q

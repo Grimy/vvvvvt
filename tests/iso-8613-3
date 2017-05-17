@@ -1,2 +1,15 @@
-[;;255~[38;2mm
-[;;0;0;0m
+ISO-8613-3 (truecolor) support across terminals is an absolute mess:
+
+* The standard clearly defines colon (03/10) as the parameter element separator,
+but XTerm also accepts semicolon (03/11), which creates ambiguities, since
+semicolon is also the parameter separator. st and urxvt *only* accept the
+invalid syntax with semicolons.
+
+* Omitted parameter elements are supposed to represent a default value. In
+XTerm, this only works when semicolons are used as the separator. In st and
+urxvt, omitting any parameter element will cause all parameter elements to be
+interpreted as parameters instead.
+
+* urxvt does not support direct RGB colors.
+
+[38;5;42;48;2;255mO[38:5:234;48:5:253mO[;38:2:255:127:;48:2:::255;1mO

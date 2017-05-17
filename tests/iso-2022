@@ -1,0 +1,26 @@
+ISO 2022 defines techinques for swapping between multiple character sets.
+
+Full range of all five supported charsets:
+(0 !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
+(< !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
+(> !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
+(A !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
+(B !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
+
+Invoking charsets before and after designating them:
+}}[n}[o}
+(B})0}*<}+A}
+}}n}o}
+}*>}+>}}
+
+Grid drawing:
+
+lqwqk
+x→x↓x
+tqnqu
+x↑x←x
+mqvqj
+
+Meaningless but valid sequences:
+ !"#$%&'()*+,-./0})1} )>}))>})#>}
+)>

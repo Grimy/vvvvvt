@@ -3,3 +3,8 @@
 * more tests
 * set colors 232 — 255 as gradient from 0 → 15?
 * add bg/fg colors separate from 0 and 15?
+* soft reset
+* set title
+* handle CSI 0"q, CSI 1"q (protected chars)
+* consider http://bjoern.hoehrmann.de/utf-8/decoder/dfa/
+* revert the CSI parsing change in HEAD

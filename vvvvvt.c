@@ -343,8 +343,9 @@ static void __attribute__((noreturn)) die(const char* message)
 	clean_exit(w.disp);
 }
 
-static void fix_stuff()
+static void term_init()
 {
+	term.top = 0;
 	term.bot = pty.rows - 1;
 	for (u64 x = 0; x < LINE_SIZE; x += 8)
 		term.tabs[x] = true;
@@ -360,8 +361,7 @@ static void fix_pty_size(int width, int height)
 
 	pty.cols = LIMIT(new_size.x, 1, LINE_SIZE - 1);
 	pty.rows = LIMIT(new_size.y, 1, HIST_SIZE / 2);
-	term.top = 0;
-	fix_stuff();
+	term_init();
 	move_to(cursor.x, cursor.y);
 
 	// Send our size to the pty driver so that applications can query it
@@ -905,29 +905,29 @@ static void set_mode(bool set, int mode)
 // Parse and interpret a control sequence started by CSI (ESC [)
 static void handle_csi()
 {
-	static int arg[16];
-
-	u8 private_byte = 0;
+	int arg[16] = { 0 };
 	int *last_arg = arg;
-	u8 intermediate_byte = 0;
+	u64 extra = 0;
 	u8 c = pty_getchar();
-	*arg = 0;
 
 	for (; BETWEEN(c, '<', '?'); c = pty_getchar())
-		private_byte += c;
+		extra += c;
 
 	for (; BETWEEN(c, '0', ';'); c = pty_getchar())
 		if (last_arg > arg + LEN(arg) - 4)
 			/* do nothing, to prevent an overflow */;
 		else if (c > '9')
-			*++last_arg = 0;
+			++last_arg;
 		else if (*last_arg < 10000)
 			*last_arg = *last_arg * 10 + c - '0';
 
-	for (; BETWEEN(c, ' ', '?'); c = pty_getchar())
-		intermediate_byte += c;
+	for (; BETWEEN(c, ' ', '/'); c = pty_getchar())
+		extra += c;
 
-	switch (private_byte << 16 | intermediate_byte << 8 | c) {
+	for (; BETWEEN(c, ' ', '?'); c = pty_getchar())
+		extra = 0xFF;
+
+	switch (extra << 8 | c) {
 	case 'A': // CUU — Cursor <n> up
 		move_to(cursor.x, cursor.y - MAX(*arg, 1));
 		break;
@@ -961,9 +961,11 @@ static void handle_csi()
 		*arg = MAX(*arg, 1);
 		while (++cursor.x < pty.cols - 1 && (*arg -= term.tabs[cursor.x]));
 		break;
+	case '?J':
 	case 'J': // ED — Erase display
 		erase_lines(*arg ? 0 : cursor.y + 1, *arg == 1 ? cursor.y : pty.rows);
 		// FALLTHROUGH
+	case '?K':
 	case 'K': // EL — Erase line
 		erase_chars(*arg ? 0 : cursor.x, *arg == 1 ? cursor.x + 1 : pty.cols);
 		break;
@@ -992,12 +994,12 @@ static void handle_csi()
 		break;
 	case 'Z': // CBT — Cursor backward <n> tabulation stops
 		*arg = MAX(*arg, 1);
-		while (--cursor.x && (*arg -= term.tabs[cursor.x]));
+		while (cursor.x < pty.cols && --cursor.x && (*arg -= term.tabs[cursor.x]));
 		break;
-	case 'c':    // DA — Device Attributes
-	case '>\0c': // Secondary DA
+	case 'c':  // DA — Device Attributes
+	case '>c': // Secondary DA
 		if (*arg == 0)
-			printf(private_byte ? CSI ">1;0;0c" : CSI "?62;15;22c");
+			printf(extra ? CSI ">1;0;0c" : CSI "?62;15;22c");
 		break;
 	case 'd': // VPA — Move to <row>
 		move_to(cursor.x, *arg - 1);
@@ -1008,8 +1010,8 @@ static void handle_csi()
 		else if (*arg == 3)
 			zeromem(term.tabs);
 		break;
-	case '?\0h': // SM — Set Mode
-	case '?\0l': // RM — Reset Mode
+	case '?h': // SM — Set Mode
+	case '?l': // RM — Reset Mode
 		for (int *p = arg; p <= last_arg; ++p)
 			set_mode(c == 'h', *p);
 		break;
@@ -1092,7 +1094,7 @@ static void handle_esc()
 		zeromem(term);
 		zeromem(cursor);
 		zeromem(saved_cursors);
-		fix_stuff();
+		term_init();
 		break;
 	case 'n': // Invoke the G2 character set
 	case 'o': // Invoke the G3 character set
