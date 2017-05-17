@@ -37,6 +37,9 @@
 #define POINT_GT(a, b)      ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
 #define LINE(y)             (term.hist[((y) + term.scroll) % HIST_SIZE])
 
+#define ESC '\033'
+#define CSI "\033["
+
 #define zeromem(x)          (memset(&(x), 0, sizeof(x)))
 
 typedef enum { false, true } bool;
@@ -279,12 +282,12 @@ static void copy(bool clipboard)
 static void paste(bool clipboard)
 {
 	if (term.bracketed_paste)
-		printf("\033[200~");
+		printf(CSI "200~");
 
 	system(clipboard ? "xsel -bo | tr '\n' '\r'" : "xsel -o | tr '\n' '\r'");
 
 	if (term.bracketed_paste)
-		printf("\033[201~");
+		printf(CSI "201~");
 }
 
 // Compute the djb2 hash of the contents of the selection
@@ -619,13 +622,13 @@ static void draw(void)
 static void special_key(u8 c, int state)
 {
 	if (state && c < 'A')
-		printf("\033[%d;%d~", c, state + 1);
+		printf(CSI "%d;%d~", c, state + 1);
 	else if (state)
-		printf("\033[1;%d%c", state + 1, c);
+		printf(CSI "1;%d%c", state + 1, c);
 	else if (c < 'A')
-		printf("\033[%d~", c);
+		printf(CSI "%d~", c);
 	else
-		printf("\033%c%c", term.app_keys ? 'O' : '[', c);
+		printf("%c%c%c", ESC, term.app_keys ? 'O' : '[', c);
 }
 
 // Handle keyboard shortcuts, or print the pressed key to the pty
@@ -648,7 +651,7 @@ static void on_keypress(XKeyEvent *e)
 	int len = XLookupString(e, buf, LEN(buf) - 1, &keysym, NULL);
 
 	if (meta && term.meta_sends_escape && len)
-		printf("%c", 033);
+		putchar(ESC);
 
 	if (shift && keysym == XK_Insert)
 		paste(false);
@@ -661,11 +664,11 @@ static void on_keypress(XKeyEvent *e)
 	else if (ctrl && shift && keysym == XK_V)
 		paste(true);
 	else if (keysym == XK_ISO_Left_Tab)
-		printf("\033[Z");
+		printf(CSI "Z");
 	else if (ctrl && keysym == XK_question)
-		printf("%c", 127);
+		putchar(127);
 	else if (keysym == XK_BackSpace)
-		printf("%c", ctrl ? 027 : 0177);
+		putchar(ctrl ? 23 : 127);
 	else if (BETWEEN(keysym, 0xff50, 0xffff) && codes[keysym - 0xff50])
 		special_key(codes[keysym - 0xff50], 4 * ctrl + 2 * meta + shift);
 	else if (len)
@@ -712,7 +715,7 @@ static void on_mouse(XButtonEvent *e)
 
 	if (term.report_buttons && !(e->state & ShiftMask)) {
 		if ((button || term.report_motion) && pos.x <= 222 && pos.y <= 222)
-			printf("\033[M%c%c%c", 31 + button, 33 + pos.x, 33 + pos.y);
+			printf(CSI "M%c%c%c", 31 + button, 33 + pos.x, 33 + pos.y);
 		return;
 	}
 
@@ -770,7 +773,7 @@ static void dispatch_event(XEvent * e)
 	case FocusOut:
 		w.focused = e->type == FocusIn;
 		if (term.report_focus)
-			printf("\033[%c", w.focused ? 'I' : 'O');
+			printf(CSI "%c", w.focused ? 'I' : 'O');
 		break;
 	}
 }
@@ -899,7 +902,7 @@ static void set_mode(bool set, int mode)
 	}
 }
 
-// Parse and interpret a control sequence started by ESC [
+// Parse and interpret a control sequence started by CSI (ESC [)
 static void handle_csi()
 {
 	static int arg[16];
@@ -994,7 +997,7 @@ static void handle_csi()
 	case 'c':    // DA — Device Attributes
 	case '>\0c': // Secondary DA
 		if (*arg == 0)
-			printf(private_byte ? "\033[>1;0;0c" : "\033[?62;15;22c");
+			printf(private_byte ? CSI ">1;0;0c" : CSI "?62;15;22c");
 		break;
 	case 'd': // VPA — Move to <row>
 		move_to(cursor.x, *arg - 1);
@@ -1015,9 +1018,9 @@ static void handle_csi()
 		break;
 	case 'n': // DSR – Device Status Report (cursor position)
 		if (*arg == 5)
-			printf("\033[0n");
+			printf(CSI "0n");
 		else if (*arg == 6)
-			printf("\033[%i;%iR", cursor.y + 1, cursor.x + 1);
+			printf(CSI "%i;%iR", cursor.y + 1, cursor.x + 1);
 		break;
 	case ' q': // DECSCUSR — Set Cursor Style
 		if (*arg <= 6)
@@ -1044,16 +1047,14 @@ static void handle_csi()
 // Interpret an escape sequence started by an ESC byte
 static void handle_esc()
 {
-	static u8 charset_names[256] = { ['0'] = 2, ['<'] = 3, ['>'] = 1, ['A'] = 4, ['B'] = 1 };
-
 	u8 second_byte = pty_getchar(), final_byte = second_byte;
 	while (BETWEEN(final_byte, ' ', '/'))
 		final_byte = pty_getchar();
 
 	switch (second_byte) {
 	case '(' ... '+':
-		if (charset_names[final_byte])
-			term.charsets[second_byte - '('] = charset_names[final_byte] - 1;
+		if (strchr("0<>AB", final_byte))
+			term.charsets[second_byte - '('] = final_byte % ESC & 3;
 		break;
 	case '7': // DECSC — Save Cursor
 		saved_cursors[term.alt] = cursor;
@@ -1079,9 +1080,9 @@ static void handle_esc()
 	case ']': // OSC — Operating System Command
 	case '^': // PM — Privacy Message
 	case '_': // APC — Application Program Command
-		while (final_byte != '\033' && final_byte != '\a')
+		while (final_byte != ESC && final_byte != '\a')
 			final_byte = pty_getchar();
-		if (final_byte == '\033')
+		if (final_byte == ESC)
 			handle_esc();
 		break;
 	case '[': // CSI — Control Sequence Introducer
@@ -1121,7 +1122,7 @@ invalid_utf8:
 	case '\017': // LS0 — Locking shift 0
 		term.charset = u == '\016';
 		return;
-	case '\033': // ESC
+	case ESC:
 		handle_esc();
 		return;
 	case ' ' ... '~':
