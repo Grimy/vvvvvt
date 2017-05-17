@@ -134,6 +134,15 @@ static struct {
 	bool focused;
 } w;
 
+static const u8 charsets[][380] = {
+	"  ! \" # $ % & ' ( ) * + , - . / 0 1 2 3 4 5 6 7 8 9 : ; < = > ? @ A B C D E F G H I J K L M N O "
+	"P Q R S T U V W X Y Z [ \\ ] ^ _ ◆ ▒ ␉ ␌ ␍ ␊ ° ± ␤ ␋ ┘ ┐ ┌ └ ┼ ⎺ ⎻ ─ ⎼ ⎽ ├ ┤ ┴ ┬ │ ≤ ≥ π ≠ £ · ",
+	"  ¡ ¢ £ $ ¥ & § ¨ © ª « , - . / ° ± ² ³ 4 µ ¶ · 8 ¹ º » ¼ ½ > ¿ À Á Â Ã Ä Å Æ G Ç È É Ê Ë Ì Í Î "
+	"P Ñ Ò Ó Ô Õ Ö W Ø Ù Ú Û Ü Ý ^ ß à á â ã ä å æ ç è é ê ë ì í î ï p ñ ò ó ô õ ö w ø ù ú û ü ÿ ~ ",
+	"  ¡ ¢ £ ¤ ¥ ¦ § ¨ © ª « ¬ ­ ® ¯ ° ± ² ³ ´ µ ¶ · ¸ ¹ º » ¼ ½ ¾ ¿ À Á Â Ã Ä Å Æ Ç È É Ê Ë Ì Í Î Ï "
+	"Ð Ñ Ò Ó Ô Õ Ö × Ø Ù Ú Û Ü Ý Þ ß à á â ã ä å æ ç è é ê ë ì í î ï ð ñ ò ó ô õ ö ÷ ø ù ú û ü ý þ ",
+};
+
 // Number of bytes in an UTF-8 sequence starting with byte `c`
 static u32 utf_len(u8 c)
 {
@@ -1035,13 +1044,16 @@ static void handle_csi()
 // Interpret an escape sequence started by an ESC byte
 static void handle_esc()
 {
+	static u8 charset_names[256] = { ['0'] = 2, ['<'] = 3, ['>'] = 1, ['A'] = 4, ['B'] = 1 };
+
 	u8 second_byte = pty_getchar(), final_byte = second_byte;
 	while (BETWEEN(final_byte, ' ', '/'))
 		final_byte = pty_getchar();
 
 	switch (second_byte) {
 	case '(' ... '+':
-		term.charsets[second_byte - '('] = final_byte;
+		if (charset_names[final_byte])
+			term.charsets[second_byte - '('] = charset_names[final_byte] - 1;
 		break;
 	case '7': // DECSC — Save Cursor
 		saved_cursors[term.alt] = cursor;
@@ -1131,11 +1143,9 @@ invalid_utf8:
 			rune->u[i & 3] = u;
 		}
 
-		if (term.charsets[term.charset] == '0' && BETWEEN(u, 'j', 'x')) {
-			memcpy(rune, &"┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│"[(u - 'j') * 3], 3);
-		} else if (term.charsets[term.charset] == 'A' && BETWEEN(u, ' ', '~')) {
-			rune->u[0] = 194 + (u > '?');
-			rune->u[1] = 128 + (u & '?');
+		if (term.charsets[term.charset] && u <= '~') {
+			const u8 *p = charsets[term.charsets[term.charset] - 1] + 4 * (u - ' ');
+			memcpy(rune, p, utf_len(*p));
 		}
 	}
 }
