@@ -1,4 +1,5 @@
 *.o
-vvvvvt
+vvvvvt*
+output*
 tags
 perf.data*

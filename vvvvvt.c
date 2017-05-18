@@ -327,20 +327,11 @@ static void sel_set_point(Point point)
 	sel.hash = sel_get_hash();
 }
 
-// Keep Valgrind from complaining
-static int __attribute__((noreturn)) clean_exit(Display *disp)
-{
-	for (int i = 0; i < 4; ++i)
-		XftFontClose(disp, w.font[i]);
-	XCloseDisplay(disp);
-	exit(0);
-}
-
 // Exit after a failed syscall
 static void __attribute__((noreturn)) die(const char* message)
 {
 	perror(message);
-	clean_exit(w.disp);
+	exit(1);
 }
 
 static void term_init()
@@ -448,6 +439,14 @@ static void load_resources()
 	term.bold_as_bright = is_true(get_resource("showBoldAsBright", "yes"));
 }
 
+// Keep Valgrind from complaining
+static void clean_exit(void)
+{
+	for (int i = 0; i < 4; ++i)
+		XftFontClose(w.disp, w.font[i]);
+	XCloseDisplay(w.disp);
+}
+
 // Connect to the X server and set up our windows (gritty X11 stuff)
 static void x_init(void)
 {
@@ -473,12 +472,15 @@ static void x_init(void)
 	XChangeWindowAttributes(w.disp, w.win, CWBitGravity, &(XSetWindowAttributes) { .bit_gravity = NorthWestGravity });
 	w.draw = XftDrawCreate(w.disp, w.win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
+#ifdef HEADLESS
+	w.font_width = w.font_height = 8;
+#else
 	load_resources();
-	XResizeWindow(w.disp, w.parent, 80 * w.font_width + 2 * w.border, 24 * w.font_height + 2 * w.border);
-	XSetIOErrorHandler(clean_exit);
-
+	atexit(clean_exit);
 	XMapWindow(w.disp, w.parent);
 	XMapWindow(w.disp, w.win);
+#endif
+	XResizeWindow(w.disp, w.parent, 80 * w.font_width + 2 * w.border, 24 * w.font_height + 2 * w.border);
 }
 
 // Draw the given text on screen
@@ -557,8 +559,10 @@ static void draw_rune(Point pos, Rune *cached_rune)
 	// For performance, we batch together stretches of runes with the same colors and attrs
 	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
 
+#ifndef HEADLESS
 	if ((pos.x == pty.cols || diff) && (prev.attr & ATTR_DIRTY))
 		draw_text(prev, buf, pos.x - prev_pos.x, len, prev_pos);
+#endif
 
 	if (pos.x == 0 || diff) {
 		len = 0;
@@ -802,7 +806,7 @@ static u8 pty_getchar(void)
 		pty.c = pty.buf;
 		long result = read(pty.fd, pty.buf, BUFSIZ);
 		if (result < 0)
-			clean_exit(w.disp);
+			exit(0);
 		pty.end = pty.buf + result;
 	}
 
