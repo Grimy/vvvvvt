@@ -628,7 +628,7 @@ static void special_key(u8 c, int state)
 	else if (c < 'A')
 		printf(CSI "%d~", c);
 	else
-		printf("%c%c%c", ESC, term.app_keys ? 'O' : '[', c);
+		printf("%c%c%c", ESC, term.app_keys || c > 'O' ? 'O' : '[', c);
 }
 
 // Handle keyboard shortcuts, or print the pressed key to the pty
@@ -666,9 +666,9 @@ static void on_keypress(XKeyEvent *e)
 	else if (keysym == XK_ISO_Left_Tab)
 		printf(CSI "Z");
 	else if (ctrl && keysym == XK_question)
-		putchar(127);
+		putchar('\177');
 	else if (keysym == XK_BackSpace)
-		putchar(ctrl ? 23 : 127);
+		putchar(ctrl ? '\027' : '\177');
 	else if (BETWEEN(keysym, 0xff50, 0xffff) && codes[keysym - 0xff50])
 		special_key(codes[keysym - 0xff50], 4 * ctrl + 2 * meta + shift);
 	else if (len)
@@ -905,27 +905,23 @@ static void set_mode(bool set, int mode)
 // Parse and interpret a control sequence started by CSI (ESC [)
 static void handle_csi()
 {
-	int arg[16] = { 0 };
+	int arg[32] = { 0, 0 };
 	int *last_arg = arg;
-	u64 extra = 0;
+	u8 extra = 0;
 	u8 c = pty_getchar();
 
 	for (; BETWEEN(c, '<', '?'); c = pty_getchar())
-		extra += c;
+		extra = extra ? 1 : c;
 
 	for (; BETWEEN(c, '0', ';'); c = pty_getchar())
-		if (last_arg > arg + LEN(arg) - 4)
-			/* do nothing, to prevent an overflow */;
-		else if (c > '9')
+		if (c > '9')
 			++last_arg;
-		else if (*last_arg < 10000)
+		else if (last_arg < arg + LEN(arg) && *last_arg < 5000)
 			*last_arg = *last_arg * 10 + c - '0';
-
-	for (; BETWEEN(c, ' ', '/'); c = pty_getchar())
-		extra += c;
+	last_arg = MIN(last_arg, arg + LEN(arg) - 5);
 
 	for (; BETWEEN(c, ' ', '?'); c = pty_getchar())
-		extra = 0xFF;
+		extra = extra || c > '/' ? 1 : c;
 
 	switch (extra << 8 | c) {
 	case 'A': // CUU — Cursor <n> up
@@ -959,7 +955,7 @@ static void handle_csi()
 		break;
 	case 'I': // CHT — Cursor forward <n> tabulation stops
 		*arg = MAX(*arg, 1);
-		while (++cursor.x < pty.cols - 1 && (*arg -= term.tabs[cursor.x]));
+		while (cursor.x < pty.cols - 1 && (*arg -= term.tabs[++cursor.x]));
 		break;
 	case '?J':
 	case 'J': // ED — Erase display
@@ -994,7 +990,7 @@ static void handle_csi()
 		break;
 	case 'Z': // CBT — Cursor backward <n> tabulation stops
 		*arg = MAX(*arg, 1);
-		while (cursor.x < pty.cols && --cursor.x && (*arg -= term.tabs[cursor.x]));
+		while (BETWEEN(cursor.x, 1, pty.cols -1) && (*arg -= term.tabs[--cursor.x]));
 		break;
 	case 'c':  // DA — Device Attributes
 	case '>c': // Secondary DA
@@ -1112,7 +1108,7 @@ invalid_utf8:
 		move_to(cursor.x - 1, cursor.y);
 		return;
 	case '\t':
-		while (++cursor.x < pty.cols - 1 && !term.tabs[cursor.x]);
+		while (cursor.x < pty.cols - 1 && !term.tabs[++cursor.x]);
 		return;
 	case '\n' ... '\f':
 		newline();
@@ -1161,17 +1157,17 @@ static void run(fd_set read_fds)
 	if (select(pty.fd + 1, &read_fds, 0, 0, &timeout) < 0)
 		die("select failed");
 
-	if (FD_ISSET(pty.fd, &read_fds)) {
-		scroll(term.lines - term.scroll);
-		handle_input(pty_getchar());
-		while (pty.c < pty.end)
-			handle_input(*pty.c++);
-	}
-
 	XEvent e;
 	while (XPending(w.disp)) {
 		XNextEvent(w.disp, &e);
 		dispatch_event(&e);
+	}
+
+	if (pty.rows && FD_ISSET(pty.fd, &read_fds)) {
+		scroll(term.lines - term.scroll);
+		handle_input(pty_getchar());
+		while (pty.c < pty.end)
+			handle_input(*pty.c++);
 	}
 
 	timeout.tv_usec = MIN(timeout.tv_usec - 60, 16680);

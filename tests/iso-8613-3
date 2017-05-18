@@ -13,3 +13,4 @@ interpreted as parameters instead.
 * urxvt does not support direct RGB colors.
 
 [38;5;42;48;2;255mO[38:5:234;48:5:253mO[;38:2:255:127:;48:2:::255;1mO
+[m
