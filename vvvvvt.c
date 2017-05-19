@@ -437,6 +437,7 @@ static void load_resources()
 	XMoveWindow(w.disp, w.win, w.border, w.border);
 	term.meta_sends_escape = is_true(get_resource("metaSendsEscape", ""));
 	term.bold_as_bright = is_true(get_resource("showBoldAsBright", "yes"));
+	w.dirty = true;
 }
 
 // Keep Valgrind from complaining
@@ -472,14 +473,11 @@ static void x_init(void)
 	XChangeWindowAttributes(w.disp, w.win, CWBitGravity, &(XSetWindowAttributes) { .bit_gravity = NorthWestGravity });
 	w.draw = XftDrawCreate(w.disp, w.win, DefaultVisual(w.disp, DefaultScreen(w.disp)), None);
 
-#ifdef HEADLESS
 	w.font_width = w.font_height = 8;
-#else
 	load_resources();
 	atexit(clean_exit);
 	XMapWindow(w.disp, w.parent);
 	XMapWindow(w.disp, w.win);
-#endif
 	XResizeWindow(w.disp, w.parent, 80 * w.font_width + 2 * w.border, 24 * w.font_height + 2 * w.border);
 }
 
@@ -559,10 +557,8 @@ static void draw_rune(Point pos, Rune *cached_rune)
 	// For performance, we batch together stretches of runes with the same colors and attrs
 	bool diff = rune.fg != prev.fg || rune.bg != prev.bg || rune.attr != prev.attr;
 
-#ifndef HEADLESS
 	if ((pos.x == pty.cols || diff) && (prev.attr & ATTR_DIRTY))
 		draw_text(prev, buf, pos.x - prev_pos.x, len, prev_pos);
-#endif
 
 	if (pos.x == 0 || diff) {
 		len = 0;
@@ -699,7 +695,6 @@ static void on_property_change(XPropertyEvent *e)
 	XFree(xprop);
 
 	load_resources();
-	w.dirty = true;
 
 	XWindowAttributes attrs;
 	XGetWindowAttributes(w.disp, w.parent, &attrs);
@@ -791,7 +786,7 @@ static void pty_new(char* cmd[])
 	case 0:
 		setenv("TERM", "xterm-256color", 1);
 		execvp(cmd[0], cmd);
-		die("exec failed");
+		_exit(1);
 	default:
 		signal(SIGCHLD, SIG_IGN);
 		dup2(pty.fd, 1);
@@ -803,10 +798,14 @@ static void pty_new(char* cmd[])
 static u8 pty_getchar(void)
 {
 	if (pty.c >= pty.end) {
+#ifdef HEADLESS
+		if (pty.c)
+			return '\a';
+#endif
 		pty.c = pty.buf;
 		long result = read(pty.fd, pty.buf, BUFSIZ);
 		if (result < 0)
-			exit(0);
+			exit(!pty.end);
 		pty.end = pty.buf + result;
 	}
 
@@ -1047,9 +1046,9 @@ static void handle_csi()
 }
 
 // Interpret an escape sequence started by an ESC byte
-static void handle_esc()
+static void handle_esc(u8 second_byte)
 {
-	u8 second_byte = pty_getchar(), final_byte = second_byte;
+	u8 final_byte = second_byte;
 	while (BETWEEN(final_byte, ' ', '/'))
 		final_byte = pty_getchar();
 
@@ -1085,7 +1084,7 @@ static void handle_esc()
 		while (final_byte != ESC && final_byte != '\a')
 			final_byte = pty_getchar();
 		if (final_byte == ESC)
-			handle_esc();
+			handle_esc(pty_getchar());
 		break;
 	case '[': // CSI — Control Sequence Introducer
 		handle_csi();
@@ -1125,7 +1124,7 @@ invalid_utf8:
 		term.charset = u == '\016';
 		return;
 	case ESC:
-		handle_esc();
+		handle_esc(pty_getchar());
 		return;
 	case ' ' ... '~':
 	case 128 ... 255:
@@ -1162,12 +1161,12 @@ static void run(fd_set read_fds)
 		die("select failed");
 
 	XEvent e;
-	while (XPending(w.disp)) {
+	while (XPending(w.disp) || !term.bot) {
 		XNextEvent(w.disp, &e);
 		dispatch_event(&e);
 	}
 
-	if (pty.rows && FD_ISSET(pty.fd, &read_fds)) {
+	if (FD_ISSET(pty.fd, &read_fds)) {
 		scroll(term.lines - term.scroll);
 		handle_input(pty_getchar());
 		while (pty.c < pty.end)
@@ -1184,6 +1183,18 @@ static void run(fd_set read_fds)
 // Parse arguents, initialize everything, call the main loop
 int main(int argc, char *argv[])
 {
+#ifdef HEADLESS
+	(void) argc, (void) argv;
+	pty.rows = 24;
+	pty.cols = 80;
+	while (__AFL_LOOP(1000)) {
+		pty.c = pty.end = 0;
+		handle_esc('c');
+		handle_input(pty_getchar());
+		while (pty.c < pty.end)
+			handle_input(*pty.c++);
+	}
+#else
 	x_init();
 	pty_new(argc > 1 ? argv + 1 : (char*[]) { getenv("SHELL"), NULL });
 
@@ -1194,4 +1205,5 @@ int main(int argc, char *argv[])
 
 	for (;;)
 		run(read_fds);
+#endif
 }

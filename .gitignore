@@ -1,5 +1,6 @@
 *.o
 vvvvvt*
 output*
+fuzz-tests
 tags
 perf.data*
