@@ -62,7 +62,8 @@ enum {
 	ATTR_INVISIBLE  = 1 << 8,
 	ATTR_STRUCK     = 1 << 9,
 	ATTR_BAR        = 1 << 10,
-	ATTR_DIRTY      = 1 << 11,
+	ATTR_GUARDED    = 1 << 11,
+	ATTR_DIRTY      = 1 << 12,
 };
 
 typedef struct {
@@ -120,6 +121,7 @@ static struct {
 	bool app_keys;                   // send different escape sequences for arrow keys?
 	bool meta_sends_escape;          // send an ESC char when a key is pressed with meta held?
 	bool bold_as_bright;             // use bright (8–15) colors for bold characters
+	bool guarded;
 } term;
 
 // Drawing context
@@ -161,20 +163,24 @@ static bool selected(int x, int y)
 		&& (y != sel.end.y || x < sel.end.x);
 }
 
-// Erase all characters between lines `start` and `end` (exclusive)
-static void erase_lines(int start, int end)
+// Erase characters between columns `start` and `end` in the current line
+static void erase_chars(int y, int start, int end)
 {
-	for (int y = start; y < end; y++)
-		zeromem(LINE(y));
+	Rune *line = LINE(y);
+	for (int x = start; x < end; ++x)
+		if (!(line[x].attr & ATTR_GUARDED))
+			line[x] = (Rune) { "", 0, 0, cursor.rune.bg };
 }
 
-// Erase characters between columns `start` and `end` in the current line
-static void erase_chars(int start, int end)
+// Erase all characters between lines `start` and `end`
+static void erase_lines(int start, int end)
 {
-	Rune *line = LINE(cursor.y);
-	// TODO memset(line + start, cursor.rune.bg, (end - start) * sizeof(Rune));
-	for (int x = start; x < end; ++x)
-		line[x] = (Rune) { "", 0, 0, cursor.rune.bg };
+	Rune *line = LINE(start);
+	if (cursor.rune.bg || LINE(end) < line || term.guarded)
+		for (int y = start; y < end; ++y)
+			erase_chars(y, 0, pty.cols);
+	else // fast path
+		memset(line, 0, sizeof(Rune) * LINE_SIZE * (end - start));
 }
 
 // Move lines between `start` and `end` by `diff` rows down
@@ -207,7 +213,7 @@ static void move_chars(int start, int end, int diff)
 
 	for (int x = start; x != last; x += step)
 		line[x] = line[x + diff];
-	erase_chars(MIN(last, end), MAX(last, end) + 1);
+	erase_chars(cursor.y, MIN(last, end), MAX(last, end) + 1);
 }
 
 // Set the cursor position
@@ -966,7 +972,7 @@ static void handle_csi()
 		// FALLTHROUGH
 	case '?K':
 	case 'K': // EL — Erase line
-		erase_chars(*arg ? 0 : cursor.x, *arg == 1 ? cursor.x + 1 : pty.cols);
+		erase_chars(cursor.y, *arg ? 0 : cursor.x, *arg == 1 ? cursor.x + 1 : pty.cols);
 		break;
 	case 'L': // IL — Insert <n> blank lines
 	case 'M': // DL — Delete <n> lines
@@ -989,7 +995,7 @@ static void handle_csi()
 		break;
 	case 'X': // ECH — Erase <n> chars
 		LIMIT(*arg, 1, pty.cols - cursor.x);
-		erase_chars(cursor.x, cursor.x + *arg);
+		erase_chars(cursor.y, cursor.x, cursor.x + *arg);
 		break;
 	case 'Z': // CBT — Cursor backward <n> tabulation stops
 		*arg = MAX(*arg, 1);
@@ -1075,6 +1081,13 @@ static void handle_esc(u8 second_byte)
 			move_lines(term.top, term.bot, -1);
 		else
 			--cursor.y;
+		break;
+	case 'V':
+		term.guarded = true;
+		cursor.rune.attr |= ATTR_GUARDED;
+		break;
+	case 'W':
+		cursor.rune.attr &= ~ATTR_GUARDED;
 		break;
 	case 'P': // DCS — Device Control String
 	case 'X': // SOS — Start of String

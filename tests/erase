@@ -5,11 +5,11 @@
 ******************************
 [4A[10G[1J[2B[20G[0J
 
-Clearing a line sets the background color (required by htop):
-******************************[15D[42m[2K[m
-
 Partial line clears:
 ******************************[10D[0K[10D[1K
+
+Total line clear:
+******************************[10D[2K
 
 CSI P (delete chars):
 abcdefghijklmnopqrstuvwxyz[999P[999C#[6G[10P
@@ -19,3 +19,10 @@ abcdefghijklmnopqrstuvwxyz[999@[20D[10@
 
 CSI X (erase chars):
 abcdefghijklmnopqrstuvwxyz[999X[20D[10X
+
+Clearing sets the background color (required by htop):
+*********************[42m[3G[1K[4C[3X[6C[3@[6C[J[m
+
+Guarded regions:
+1234567V89
+12W34V56W789[F[J[99X[K[E
