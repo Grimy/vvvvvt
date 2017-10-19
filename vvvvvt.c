@@ -34,7 +34,7 @@
 
 #define IS_DELIM(c)         (strchr(" <>()[]{}'`\"", *(c)))
 #define POINT_EQ(a, b)      ((a).x == (b).x && (a).y == (b).y)
-#define POINT_GT(a, b)      ((a).y > (b).y || ((a).y == (b).y && (a).x > (b).x))
+#define POINT_LT(a, b)      ((a).y < (b).y || ((a).y == (b).y && (a).x < (b).x))
 #define LINE(y)             (term.hist[((y) + term.scroll) % HIST_SIZE])
 
 #define ESC '\033'
@@ -260,7 +260,7 @@ static Point pixel2cell(int px, int py)
 static void next_point(Point *p)
 {
 	++p->x;
-	if (p->x == pty.cols)
+	if (p->x >= pty.cols)
 		*p = (Point) { 0, p->y + 1 };
 }
 
@@ -268,13 +268,13 @@ static void next_point(Point *p)
 static void copy(bool clipboard)
 {
 	// If the selection is empty, leave the clipboard as-is rather than emptying it
-	if (!POINT_GT(sel.end, sel.start))
+	if (POINT_EQ(sel.end, sel.start))
 		return;
 
 	FILE* pipe = popen(clipboard ? "xsel -bi" : "xsel -i", "w");
 	bool empty = false;
 
-	for (Point p = sel.start; !POINT_EQ(p, sel.end); next_point(&p)) {
+	for (Point p = sel.start; POINT_LT(p, sel.end); next_point(&p)) {
 		u8 *text = LINE(p.y)[p.x].u;
 		if (empty && *text)
 			fputc(p.x ? ' ' : '\n', pipe);
@@ -301,7 +301,7 @@ static u64 sel_get_hash()
 {
 	u64 hash = 5381;
 
-	for (Point p = sel.start; !POINT_EQ(p, sel.end); next_point(&p))
+	for (Point p = sel.start; POINT_LT(p, sel.end); next_point(&p))
 		hash = (hash << 5) + hash + LINE(p.y)[p.x].u[0];
 
 	return hash;
@@ -312,7 +312,7 @@ static void sel_set_point(Point point)
 {
 	// `point` can be before `mark` (if the user drags the mouse up/left),
 	// but `end` should always be after `start`
-	bool swapped = POINT_GT(sel.mark, point);
+	bool swapped = POINT_LT(point, sel.mark);
 	sel.start = swapped ? point : sel.mark;
 	sel.end = swapped ? sel.mark : point;
 

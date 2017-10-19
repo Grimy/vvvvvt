@@ -4,7 +4,6 @@
 * add bg/fg colors separate from 0 and 15?
 * soft reset
 * set title
-* handle ESC V, ESC W (protected chars)
 * consider http://bjoern.hoehrmann.de/utf-8/decoder/dfa/
 * print error message when exec fails
 * test scrolling region
