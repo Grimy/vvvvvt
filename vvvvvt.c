@@ -417,9 +417,11 @@ static void load_resources()
 		w.font[i] = XftFontOpenName(w.disp, w.screen, font_name);
 	}
 
+	XGlyphInfo extents;
+	XftTextExtentsUtf8(w.disp, w.font[0], (const FcChar8 *) "Q", 1, &extents);
 	double scale_height = atof(get_resource("scaleHeight", "1"));
 	w.font_height = (int) ((w.font[0]->height + 1) * scale_height + .999);
-	w.font_width = w.font[0]->max_advance_width;
+	w.font_width = extents.xOff;
 
 	// Colors
 	Colormap colormap = DefaultColormap(w.disp, w.screen);
