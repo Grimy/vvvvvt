@@ -19,6 +19,7 @@
 #include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <time.h>
 #include <unistd.h>
 
 // Config
@@ -78,6 +79,8 @@ typedef struct {
 	int x;
 	int y;
 } Point;
+
+static struct timespec monotime, timeout;
 
 // State affected by Save Cursor / Restore Cursor
 static struct {
@@ -143,6 +146,7 @@ static struct {
 // X atoms
 static Atom XA_UTF8;
 static Atom XA_CLIPBOARD;
+static Atom XA_DELETE_WINDOW;
 
 static const u8 charsets[][380] = {
 	"  ! \" # $ % & ' ( ) * + , - . / 0 1 2 3 4 5 6 7 8 9 : ; < = > ? @ A B C D E F G H I J K L M N O "
@@ -282,11 +286,9 @@ static void copy(Atom x_selection)
 }
 
 // Print the primary selection (or the clipboard, if `clipboard` is set) to the terminal
-static void paste(bool clipboard)
+static void paste(Atom selection)
 {
 	Atom prop = XInternAtom(w.disp, "XSEL_DATA", False);
-	Atom XA_CLIPBOARD = XInternAtom(w.disp, "CLIPBOARD", False);
-	Atom selection = clipboard ? XA_CLIPBOARD : XA_PRIMARY;
 
 	if (term.bracketed_paste)
 		printf(CSI "200~");
@@ -491,11 +493,10 @@ static void x_init(void)
 	XResizeWindow(w.disp, w.parent, 80 * w.font_width + 2 * w.border, 24 * w.font_height + 2 * w.border);
 
 	XA_UTF8 = XInternAtom(w.disp, "UTF8_STRING", False);
+	XA_CLIPBOARD = XInternAtom(w.disp, "CLIPBOARD", False);
+	XA_DELETE_WINDOW = XInternAtom(w.disp, "WM_DELETE_WINDOW", False);
 
-	Atom protocols[] = {
-		XInternAtom(w.disp, "WM_DELETE_WINDOW", False),
-	};
-	XSetWMProtocols(w.disp, w.parent, protocols, LEN(protocols));
+	XSetWMProtocols(w.disp, w.parent, (Atom[]) { XA_DELETE_WINDOW }, 1);
 }
 
 // Draw the given text on screen
@@ -746,7 +747,7 @@ static void on_mouse(XButtonEvent *e)
 		sel_set_point(pos);
 		break;
 	case 2:  // Middle click
-		paste(false);
+		paste(XA_PRIMARY);
 		break;
 	case 3:  // Right click
 		sel.snap = SNAP_LINE;
@@ -793,7 +794,7 @@ static void on_selection_request(XSelectionRequestEvent *e)
 
 	// fprintf(stderr, "target=%s, property=%s\n", XGetAtomName(w.disp, e->target), XGetAtomName(w.disp, e->property));
 	Atom xa_targets = XInternAtom(w.disp, "TARGETS", False);
-	char data[4096];
+	unsigned char data[4096];
 	u32 data_len = 0;
 
 	// TODO TODO TODO fix buffer overflow
@@ -869,7 +870,8 @@ static void dispatch_event(XEvent *e)
 			printf(CSI "%c", w.focused ? 'I' : 'O');
 		break;
 	case ClientMessage:
-		exit(0);
+		if ((Atom) e->xclient.data.l[0] == XA_DELETE_WINDOW)
+			exit(0);
 		break;
 
 	case Expose:
@@ -886,7 +888,6 @@ static void dispatch_event(XEvent *e)
 	case SelectionRequest:
 		on_selection_request((XSelectionRequestEvent*) e);
 		break;
-
 	}
 }
 
@@ -1076,7 +1077,7 @@ static void handle_csi()
 	case '?J':
 	case 'J': // ED — Erase display
 		erase_lines(*arg ? 0 : cursor.y + 1, *arg == 1 ? cursor.y : pty.rows);
-		// FALLTHROUGH
+		__attribute__((fallthrough));
 	case '?K':
 	case 'K': // EL — Erase line
 		erase_chars(cursor.y, *arg ? 0 : cursor.x, *arg == 1 ? cursor.x + 1 : pty.cols);
@@ -1275,10 +1276,14 @@ invalid_utf8:
 // Main loop: listen for X events and pty input, and periodically redraw the screen
 static void run(fd_set read_fds)
 {
-	static struct timeval timeout;
+	clock_gettime(CLOCK_MONOTONIC, &monotime);
+	u64 old_time = monotime.tv_nsec;
 
-	if (select(pty.fd + 1, &read_fds, 0, 0, &timeout) < 0)
+	if (pselect(pty.fd + 1, &read_fds, 0, 0, &timeout, NULL) < 0)
 		die("select failed");
+
+	clock_gettime(CLOCK_MONOTONIC, &monotime);
+	int64_t elapsed_time = monotime.tv_nsec - old_time;
 
 	XEvent e;
 	while (XPending(w.disp) || !term.bot) {
@@ -1293,10 +1298,10 @@ static void run(fd_set read_fds)
 			handle_input(*pty.c++);
 	}
 
-	timeout.tv_usec = MIN(timeout.tv_usec - 60, 16680);
-	if (timeout.tv_usec <= 0) {
+	timeout.tv_nsec = MIN(timeout.tv_nsec - elapsed_time, 1668000);
+	if (timeout.tv_nsec <= 0) {
 		draw();
-		timeout.tv_usec = 999999;
+		timeout.tv_nsec = 999999999;
 	}
 }
 
