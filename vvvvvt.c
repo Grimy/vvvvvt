@@ -144,8 +144,6 @@ static struct {
 } w;
 
 // X atoms
-static Atom XA_UTF8;
-static Atom XA_CLIPBOARD;
 static Atom XA_DELETE_WINDOW;
 
 static const u8 charsets[][380] = {
@@ -274,27 +272,33 @@ static void next_point(Point *p)
 }
 
 // Copy the selected text to the primary selection (or the clipboard, if `clipboard` is set)
-// TODO properly handle clipboard
-// TODO test multi-line selections
-static void copy(Atom x_selection)
+static void copy(bool clipboard)
 {
 	// If the selection is empty, leave the clipboard as-is rather than emptying it
 	if (POINT_EQ(sel.end, sel.start))
 		return;
 
-	XSetSelectionOwner(w.disp, x_selection, w.win, CurrentTime);
+	FILE* pipe = popen(clipboard ? "xsel -bi" : "xsel -i", "w");
+	int y = sel.start.y;
+
+	for (Point p = sel.start; POINT_LT(p, sel.end); next_point(&p)) {
+		u8 *text = LINE(p.y)[p.x].u;
+		if (p.y > y)
+			fputc('\n', pipe);
+		y = p.y;
+		fprintf(pipe, "%.4s", text);
+	}
+
+	pclose(pipe);
 }
 
 // Print the primary selection (or the clipboard, if `clipboard` is set) to the terminal
-static void paste(Atom selection)
+static void paste(bool clipboard)
 {
-	Atom prop = XInternAtom(w.disp, "XSEL_DATA", False);
-
 	if (term.bracketed_paste)
 		printf(CSI "200~");
 
-	XConvertSelection(w.disp, selection, XA_UTF8, prop, w.win, CurrentTime);
-	XSync(w.disp, False);
+	system(clipboard ? "xsel -bo | tr '\n' '\r'" : "xsel -o | tr '\n' '\r'");
 
 	if (term.bracketed_paste)
 		printf(CSI "201~");
@@ -492,10 +496,7 @@ static void x_init(void)
 	XMapWindow(w.disp, w.win);
 	XResizeWindow(w.disp, w.parent, 80 * w.font_width + 2 * w.border, 24 * w.font_height + 2 * w.border);
 
-	XA_UTF8 = XInternAtom(w.disp, "UTF8_STRING", False);
-	XA_CLIPBOARD = XInternAtom(w.disp, "CLIPBOARD", False);
 	XA_DELETE_WINDOW = XInternAtom(w.disp, "WM_DELETE_WINDOW", False);
-
 	XSetWMProtocols(w.disp, w.parent, (Atom[]) { XA_DELETE_WINDOW }, 1);
 }
 
@@ -672,15 +673,15 @@ static void on_keypress(XKeyEvent *e)
 		putchar(ESC);
 
 	if (shift && keysym == XK_Insert)
-		paste(XA_PRIMARY);
+		paste(false);
 	else if (shift && keysym == XK_Prior)
 		scroll(4 - pty.rows);
 	else if (shift && keysym == XK_Next)
 		scroll(pty.rows - 4);
 	else if (ctrl && shift && keysym == XK_C)
-		copy(XA_CLIPBOARD);
+		copy(true);
 	else if (ctrl && shift && keysym == XK_V)
-		paste(XA_CLIPBOARD);
+		paste(true);
 	else if (keysym == XK_ISO_Left_Tab)
 		printf(CSI "Z");
 	else if (ctrl && keysym == XK_question)
@@ -747,14 +748,14 @@ static void on_mouse(XButtonEvent *e)
 		sel_set_point(pos);
 		break;
 	case 2:  // Middle click
-		paste(XA_PRIMARY);
+		paste(false);
 		break;
 	case 3:  // Right click
 		sel.snap = SNAP_LINE;
 		sel_set_point(pos);
 		break;
 	case 4:  // Any button released
-		copy(XA_PRIMARY);
+		copy(false);
 		break;
 	case 65: // Scroll wheel up
 		scroll(-5);
@@ -763,82 +764,6 @@ static void on_mouse(XButtonEvent *e)
 		scroll(5);
 		break;
 	}
-}
-
-static void on_selection_notify(XSelectionEvent *e)
-{
-	Atom target;
-	int format;
-	unsigned long bytesafter, length;
-	unsigned char * value;
-
-	XGetWindowProperty(
-		e->display, e->requestor, e->property,
-		0L, 1000000, False, (Atom) AnyPropertyType,
-		&target, &format, &length, &bytesafter, &value);
-
-	printf("%s", value);
-}
-
-static void on_selection_request(XSelectionRequestEvent *e)
-{
-	XSelectionEvent ev = {
-		.type      = SelectionNotify,
-		.display   = e->display,
-		.property  = e->property,
-		.requestor = e->requestor,
-		.selection = e->selection,
-		.target    = e->target,
-		.time      = e->time,
-	};
-
-	// fprintf(stderr, "target=%s, property=%s\n", XGetAtomName(w.disp, e->target), XGetAtomName(w.disp, e->property));
-	Atom xa_targets = XInternAtom(w.disp, "TARGETS", False);
-	unsigned char data[4096];
-	u32 data_len = 0;
-
-	// TODO TODO TODO fix buffer overflow
-	bool empty = false;
-
-	for (Point p = sel.start; POINT_LT(p, sel.end); next_point(&p)) {
-		u8 *text = LINE(p.y)[p.x].u;
-		if (empty && *text)
-			data[data_len++] = p.x ? ' ' : '\n';
-		empty = *text == '\0';
-		for (u32 i = 0; i < 4 && text[i]; ++i)
-			data[data_len++] = text[i];
-	}
-
-	if (e->target == xa_targets) {
-		*(Atom*) data = XA_UTF8;
-		data_len = 1;
-
-		XChangeProperty(
-				w.disp,
-				e->requestor,
-				e->property,
-				XA_ATOM,         // target
-				32,              // format
-				PropModeReplace, // mode
-				data,            // data
-				data_len         // nelements
-		);
-	}
-
-	else if (e->target == XA_UTF8) {
-		XChangeProperty(
-				w.disp,
-				e->requestor,
-				e->property,
-				e->target,       // target
-				8,               // format
-				PropModeReplace, // mode
-				data,            // data
-				data_len         // nelements
-		);
-	}
-
-	XSendEvent(w.disp, e->requestor, False, 0, (XEvent *) &ev);
 }
 
 // Delegate to the appropriate event handler, depending on the event’s type
@@ -873,20 +798,8 @@ static void dispatch_event(XEvent *e)
 		if ((Atom) e->xclient.data.l[0] == XA_DELETE_WINDOW)
 			exit(0);
 		break;
-
 	case Expose:
 		w.dirty = true;
-		break;
-
-	// Selections
-	case SelectionNotify:
-		on_selection_notify((XSelectionEvent*) e);
-		break;
-	case SelectionClear:
-		sel.end = sel.start;
-		break;
-	case SelectionRequest:
-		on_selection_request((XSelectionRequestEvent*) e);
 		break;
 	}
 }
