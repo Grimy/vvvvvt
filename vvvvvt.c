@@ -1072,6 +1072,28 @@ static void handle_csi()
 	}
 }
 
+// Parse and interpret a control sequence started by OSC (ESC ])
+static bool handle_osc()
+{
+	if (pty_getchar() != '2')
+		return false;
+	if (pty_getchar() != ';')
+		return false;
+
+	char title[32] = "";
+	int i = 0;
+
+	while (1) {
+		char c = pty_getchar();
+		if (c == ESC || c == '\a')
+			break;
+		if (i < 31)
+			title[i++] = c;
+	}
+
+	return true;
+}
+
 // Interpret an escape sequence started by an ESC byte
 static void handle_esc(u8 second_byte)
 {
@@ -1110,9 +1132,12 @@ static void handle_esc(u8 second_byte)
 	case 'W':
 		cursor.rune.attr &= ~ATTR_GUARDED;
 		break;
+	case ']': // OSC — Operating System Command
+		if (handle_osc())
+			break;
+		__attribute__((fallthrough));
 	case 'P': // DCS — Device Control String
 	case 'X': // SOS — Start of String
-	case ']': // OSC — Operating System Command
 	case '^': // PM — Privacy Message
 	case '_': // APC — Application Program Command
 		while (final_byte != ESC && final_byte != '\a')
